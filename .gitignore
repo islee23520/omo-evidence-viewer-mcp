@@ -1,0 +1,6 @@
+# Machine-specific preview sources and local logs
+local-previews.json
+*.log
+.DS_Store
+com.example.omo-evidence-gallery.plist
+.omo/
