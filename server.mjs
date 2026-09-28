@@ -1,4 +1,4 @@
-import { readdir, realpath, stat } from "node:fs/promises";
+import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute, relative, resolve } from "node:path";
 
 const home = process.env.HOME;
@@ -52,9 +52,47 @@ function sendFile(path) {
 
 async function indexPage() {
   const entries = await readdir(evidenceRoot, { withFileTypes: true });
-  const dirs = entries.filter(entry => entry.isDirectory() && !entry.name.startsWith(".")).map(entry => `<li><a href="/evidence/${encodeURIComponent(entry.name)}/">${escapeHtml(entry.name)}</a></li>`).join("");
-  const demos = [...previews, companyLayout, companyDeckPdf].filter(Boolean).map(item => `<li><a href="/preview/${item.slug}/">${escapeHtml(item.title)}</a></li>`).join("");
-  return new Response(`<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OmO Evidence Gallery</title><style>body{font:16px/1.6 system-ui;max-width:900px;margin:5vh auto;padding:0 24px;background:#faf9ff;color:#282044}a{color:#6542c5}li{margin:8px 0}h1{font-size:2rem}</style><h1>OmO Evidence Gallery</h1><p>검토용 공개 증거만 여기에 등록합니다. 이 서버는 인증 기능이 없으므로 모든 OmO 파일을 게시하지 않습니다.</p><h2>미리보기</h2><ul>${demos}</ul><h2>공개 증거 폴더</h2><ul>${dirs}</ul></html>`, { headers: { "Content-Type": "text/html; charset=utf-8", "X-Content-Type-Options": "nosniff" } });
+  const folders = entries.filter(entry => entry.isDirectory() && !entry.name.startsWith("."));
+  const prefixCounts = new Map();
+  for (const entry of folders) {
+    const prefix = entry.name.split("-").slice(0, 2).join("-");
+    prefixCounts.set(prefix, (prefixCounts.get(prefix) || 0) + 1);
+  }
+  const fallbackDate = (name, modified) => {
+    const match = /(?:^|-)20\d{6}(?=-|$)/.exec(name);
+    return match ? `${match[0].slice(-8, -4)}-${match[0].slice(-4, -2)}-${match[0].slice(-2)}` : modified.toISOString().slice(0, 10);
+  };
+  const items = await Promise.all(folders.map(async entry => {
+    const path = resolve(evidenceRoot, entry.name);
+    const info = await stat(path);
+    let metadata = {};
+    const registered = resolve(path, ".gallery.json");
+    try {
+      if ((await lstat(registered)).isFile()) metadata = await Bun.file(registered).json();
+    } catch { /* Older folders or invalid metadata fall back to the folder name. */ }
+    const prefix = entry.name.split("-").slice(0, 2).join("-");
+    return {
+      project: typeof metadata.project === "string" && metadata.project ? metadata.project : (prefixCounts.get(prefix) > 1 ? prefix : entry.name.split("-")[0]),
+      date: typeof metadata.date === "string" && metadata.date ? metadata.date : fallbackDate(entry.name, info.mtime),
+      title: typeof metadata.title === "string" && metadata.title ? metadata.title : entry.name,
+      href: `/evidence/${encodeURIComponent(entry.name)}/`,
+      kind: "Evidence",
+    };
+  }));
+  for (const item of [...previews, companyLayout, companyDeckPdf].filter(Boolean)) {
+    const source = item.source || item.root;
+    const info = source ? await stat(source).catch(() => null) : null;
+    if (!info) continue;
+    const modified = info.mtime;
+    items.push({ project: item.project || item.slug.split("-")[0], date: item.date || fallbackDate(item.slug, modified), title: item.title, href: `/preview/${encodeURIComponent(item.slug)}/`, kind: "Preview" });
+  }
+  const projects = Map.groupBy(items, item => item.project);
+  const sections = [...projects].sort(([a], [b]) => a.localeCompare(b)).map(([project, values]) => {
+    const dates = Map.groupBy(values, item => item.date);
+    const lists = [...dates].sort(([a], [b]) => b.localeCompare(a)).map(([date, rows]) => `<section class="date"><h3>${escapeHtml(date)}</h3><ul>${rows.sort((a, b) => a.title.localeCompare(b.title)).map(item => `<li><a href="${item.href}">${escapeHtml(item.title)}</a><span>${item.kind}</span></li>`).join("")}</ul></section>`).join("");
+    return `<section class="project"><h2>${escapeHtml(project)}</h2>${lists}</section>`;
+  }).join("");
+  return new Response(`<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OmO Evidence Gallery</title><style>:root{color-scheme:light}body{font:16px/1.55 system-ui;margin:0;background:#f5f3f9;color:#282044}main{max-width:960px;margin:auto;padding:48px 24px 96px}header{border-bottom:1px solid #d9d3e5;padding-bottom:24px;margin-bottom:36px}h1{font-size:clamp(2rem,5vw,3rem);letter-spacing:-.04em;margin:0 0 8px}p{color:#625a73;margin:0;max-width:65ch}h2{font-size:1.45rem;margin:0 0 16px}h3{font-size:.9rem;color:#675b7e;margin:0 0 8px}.project{background:#fff;border:1px solid #e7e1ef;border-radius:16px;padding:24px;margin:20px 0;box-shadow:0 8px 24px #2820440a}.date+ .date{margin-top:24px}ul{list-style:none;padding:0;margin:0}li{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:10px 0;border-top:1px solid #eeeaf3;overflow-wrap:anywhere}a{color:#5336a5;text-decoration:none;font-weight:550}a:hover{text-decoration:underline}a:focus-visible{outline:2px solid #5336a5;outline-offset:3px}span{color:#746b84;font-size:.8rem;white-space:nowrap}@media(max-width:600px){main{padding:32px 16px 64px}.project{padding:18px}li{align-items:start}}</style><main><header><h1>OmO Evidence Gallery</h1><p>검토용 공개 증거를 프로젝트와 날짜별로 모았습니다. 이 서버는 인증 기능이 없으므로 공개 가능한 자료만 등록하세요.</p></header>${sections || "<p>아직 등록된 증거가 없습니다.</p>"}</main></html>`, { headers: { "Content-Type": "text/html; charset=utf-8", "X-Content-Type-Options": "nosniff" } });
 }
 
 async function evidencePage(parts) {
@@ -111,6 +149,7 @@ const server = Bun.serve({ hostname: host, port, async fetch(request) {
     const preview = previews.find(item => item.slug === match[1]);
     if (!preview) return new Response("Not found", { status: 404 });
     if (!match[2]) {
+      if (!(await Bun.file(preview.source).exists())) return new Response("Not found", { status: 404 });
       const html = (await Bun.file(preview.source).text()).replaceAll('../../frontend/shared/assets/mascot/', `/preview/${preview.slug}/assets/`);
       return new Response(html, { headers: { "Content-Type": types[".html"], "X-Content-Type-Options": "nosniff" } });
     }

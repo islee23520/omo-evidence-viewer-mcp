@@ -1,4 +1,4 @@
 # Modules
 
-- [ ] Public gallery server with opt-in local preview configuration (current).
-- [ ] MCP transport, only when explicitly requested.
+- [x] Public gallery server with opt-in local preview configuration.
+- [x] Local stdio MCP registration for existing public evidence folders.

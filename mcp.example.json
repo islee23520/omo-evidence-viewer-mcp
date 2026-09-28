@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "omo-evidence-gallery": {
+      "command": "bun",
+      "args": ["/ABSOLUTE/PATH/TO/omo-evidence-viewer-mcp/mcp.mjs"]
+    }
+  }
+}
