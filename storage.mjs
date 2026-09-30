@@ -1,10 +1,46 @@
-import { mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, writeFile, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
-import { timingSafeEqual } from "node:crypto";
+import { dirname, resolve, relative, isAbsolute } from "node:path";
+import { timingSafeEqual, randomUUID } from "node:crypto";
 import { githubRepository } from "./repository.mjs";
 
 export const evidenceRoot = resolve(process.env.EVIDENCE_ROOT || resolve(homedir(), ".omo/evidence/gallery-public"));
+export async function reviewResponse(request, root, publicOrigin = process.env.REVIEW_ORIGIN) {
+  const url = new URL(request.url);
+  const slug = url.searchParams.get('slug');
+  if (!slug || !/^[a-z0-9-]+$/.test(slug)) return Response.json({ error: 'invalid slug' }, { status: 400 });
+  let entries;
+  try {
+    const directory = await realpath(resolve(root, slug));
+    const inside = relative(await realpath(root), directory);
+    if (inside.startsWith('..') || isAbsolute(inside)) throw new Error('outside root');
+    entries = JSON.parse(await readFile(resolve(directory, 'manifest.json'), 'utf8'));
+    if (!Array.isArray(entries) || entries.some(entry => !entry || !/^[a-f0-9]{64}$/.test(entry.sha256) || typeof entry.name !== 'string')) throw new Error('invalid manifest');
+  } catch { return Response.json({ error: 'review manifest not found' }, { status: 404 }); }
+  const dir = resolve(root, '.reviews', slug);
+  const allowed = new Map(entries.map(entry => [entry.sha256, entry]));
+  if (request.method === 'GET') {
+    const decisions = {};
+    for (const hash of allowed.keys()) {
+      try { decisions[hash] = JSON.parse(await readFile(resolve(dir, `${hash}.json`), 'utf8')); }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    return Response.json({ schemaVersion: 1, decisions }, { headers: { 'Cache-Control': 'no-store' } });
+  }
+  if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+  if (request.headers.get('origin') !== (publicOrigin || url.origin)) return Response.json({ error: 'same-origin review required' }, { status: 403 });
+  const text = await request.text();
+  if (text.length > 12000) return Response.json({ error: 'review too large' }, { status: 413 });
+  let data;
+  try { data = JSON.parse(text); } catch { return Response.json({ error: 'invalid JSON' }, { status: 400 }); }
+  if (!allowed.has(data.sha256) || !['pass', 'fail', 'pending'].includes(data.verdict) || typeof data.note !== 'string' || data.note.length > 4000) return Response.json({ error: 'invalid image or verdict' }, { status: 400 });
+  const decision = { verdict: data.verdict, note: data.note, name: allowed.get(data.sha256).name, updatedAt: new Date().toISOString() };
+  await mkdir(dir, { recursive: true });
+  const temp = resolve(dir, `${data.sha256}-${randomUUID()}.tmp`);
+  await writeFile(temp, JSON.stringify(decision));
+  await rename(temp, resolve(dir, `${data.sha256}.json`));
+  return Response.json({ sha256: data.sha256, decision, saved: true }, { headers: { 'Cache-Control': 'no-store' } });
+}
 export const retentionDays = Number(process.env.RETENTION_DAYS || 30);
 if (!Number.isFinite(retentionDays) || retentionDays <= 0) throw new Error("RETENTION_DAYS must be positive");
 

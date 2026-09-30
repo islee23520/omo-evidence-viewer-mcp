@@ -1,6 +1,6 @@
 import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute, relative, resolve } from "node:path";
-import { cleanupEvidence, evidenceRoot, uploadEvidence } from "./storage.mjs";
+import { cleanupEvidence, evidenceRoot, uploadEvidence, reviewResponse } from "./storage.mjs";
 import { githubRepository } from "./repository.mjs";
 
 const port = Number(process.env.PORT || 17678);
@@ -147,6 +147,7 @@ setInterval(() => cleanupEvidence().then(removed => console.log(JSON.stringify({
 const server = Bun.serve({ hostname: host, port, maxRequestBodySize: 100 * 1024 * 1024, async fetch(request) {
   const path = new URL(request.url).pathname;
   if (path === "/health") return Response.json({ status: "ok" });
+  if (path === "/api/reviews") return reviewResponse(request, evidenceRoot);
   if (path === "/api/evidence" && request.method === "POST") return uploadEvidence(request);
   const visibilityPath = /^\/api\/evidence\/([a-z0-9-]+)\/visibility$/.exec(path);
   if (visibilityPath && request.method === "PATCH") return uploadEvidence(request, visibilityPath[1]);
