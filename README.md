@@ -19,12 +19,12 @@ For an optional macOS login service, copy `com.example.omo-evidence-gallery.plis
 
 ## Persistent Docker server
 
-Place a Dockerfile in a deployment workspace containing copies of `server.mjs` and `storage.mjs`, or use this checkout as the build context:
+Place a Dockerfile in a deployment workspace containing copies of `server.mjs`, `storage.mjs`, and `repository.mjs`, or use this checkout as the build context:
 
 ```dockerfile
 FROM oven/bun:1.4
 WORKDIR /app
-COPY server.mjs storage.mjs ./
+COPY server.mjs storage.mjs repository.mjs ./
 ENV HOST=0.0.0.0 PORT=17678 EVIDENCE_ROOT=/data/gallery-public
 EXPOSE 17678
 CMD ["bun", "server.mjs"]
@@ -104,4 +104,4 @@ The MCP reads this file automatically; explicit environment variables take prece
 
 Run `bun browse.mjs` on a key-equipped computer to browse without a manual Access login. Open the printed loopback URL on that computer. This read-only gateway adds service authentication to upstream requests and binds only `127.0.0.1`; it does not accept uploads, forward browser cookies, or expose the key to page scripts. A key file alone does not authenticate an ordinary browser request to the public hostname. Keep the gateway private and revoke its service token when retiring a computer. The public hostname still requires Access authentication for clients without a valid credential.
 
-For a persistent client, put `mcp.mjs`, `browse.mjs`, and `install-client.mjs` together in a private installation directory, create the credential file, then run `bun install-client.mjs`. It preserves other MCP servers while registering `evidence-viewer` and installs a user-level gateway service: LaunchAgent on macOS, systemd user service on Linux, or a logon task on Windows. Verify `http://127.0.0.1:17677/health` returns `{"status":"ok"}` without an interactive login. Services run as the installing user; start the user's desktop/session service manager before installing. Grant service tokens per computer where independent revocation is needed, and rotate expired or exposed credentials.
+For a persistent client, put `mcp.mjs`, `repository.mjs`, `browse.mjs`, and `install-client.mjs` together in a private installation directory, create the credential file, then run `bun install-client.mjs`. It preserves other MCP servers while registering `evidence-viewer` and installs a user-level gateway service: LaunchAgent on macOS, systemd user service on Linux, or a logon task on Windows. Verify `http://127.0.0.1:17677/health` returns `{"status":"ok"}` without an interactive login. Services run as the installing user; start the user's desktop/session service manager before installing. Grant service tokens per computer where independent revocation is needed, and rotate expired or exposed credentials.
