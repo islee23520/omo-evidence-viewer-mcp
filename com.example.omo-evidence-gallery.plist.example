@@ -2,11 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.example.omo-evidence-gallery</string>
-  <key>ProgramArguments</key><array><string>/Users/YOUR_USER/.bun/bin/bun</string><string>/Users/YOUR_USER/workspace/omo-evidence-viewer-mcp/server.mjs</string></array>
-  <key>WorkingDirectory</key><string>/Users/YOUR_USER/workspace/omo-evidence-viewer-mcp</string>
-  <key>EnvironmentVariables</key><dict><key>HOME</key><string>/Users/YOUR_USER</string><key>PORT</key><string>17678</string><key>HOST</key><string>0.0.0.0</string></dict>
+  <key>ProgramArguments</key><array><string>/path/to/bun</string><string>/path/to/checkout/server.mjs</string></array>
+  <key>WorkingDirectory</key><string>/path/to/checkout</string>
+  <key>EnvironmentVariables</key><dict><key>PORT</key><string>17678</string><key>HOST</key><string>127.0.0.1</string><key>EVIDENCE_ROOT</key><string>/data/gallery-public</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/YOUR_USER/.omo/evidence/omo-evidence-gallery/stdout.log</string>
-  <key>StandardErrorPath</key><string>/Users/YOUR_USER/.omo/evidence/omo-evidence-gallery/stderr.log</string>
+  <key>StandardOutPath</key><string>/path/to/logs/stdout.log</string>
+  <key>StandardErrorPath</key><string>/path/to/logs/stderr.log</string>
 </dict></plist>

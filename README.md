@@ -1,12 +1,76 @@
 # OmO Evidence Gallery
 
-## Windows upload server
+A Bun gallery for reviewed, non-sensitive visual evidence. Keep private evidence outside the published root. The HTTP server has no built-in viewer authentication, so protect any network-facing deployment at the proxy or Cloudflare Access layer.
 
-The Windows service is deployed by the `evidence` profile in `deployment-ci` and served at `https://gallery.example.com` through Cloudflare Tunnel. Cloudflare Access allows verified `@example.org` identities. Additional email addresses can later be added as Include / Email rules in the gallery's Allow policy; Include rules are alternatives, not additional requirements. Keep the origin on the private Docker network and enable tunnel-side Access JWT enforcement for this application's audience.
+## Local Bun server
 
-Set `EVIDENCE_ROOT` to the persistent evidence directory, `UPLOAD_TOKEN` to a random secret, `RETENTION_DAYS` (default `30`), and `CLEANUP_INTERVAL_HOURS` (default `24`). The server cleans expired uploads at startup and periodically. Only entries carrying server-generated `uploadedAt` metadata are removed; older manually copied evidence is preserved. `bun storage.mjs` runs the same cleanup once. `/health` reports readiness. Requests are limited to 100 MiB and 200 files.
+Install Bun 1.4+ and run from this checkout:
 
-Upload reviewed files using multipart `metadata` JSON and repeated `files` fields. Relative file names may include subdirectories, preserving HTML assets. Unsafe paths, case-insensitive duplicates, and Windows reserved names are rejected. Each upload receives a unique directory and becomes visible only after all files and metadata are written.
+```sh
+export EVIDENCE_ROOT=/data/gallery-public
+export HOST=127.0.0.1
+export PORT=17678
+bun server.mjs
+```
+
+`EVIDENCE_ROOT` is the persistent publish-only directory. Without it, the server uses `~/.omo/evidence/gallery-public`. `HOST` defaults to `0.0.0.0`, so set it explicitly for a local-only service. Check `http://127.0.0.1:17678/health` for readiness. Copy `local-previews.example.json` to the ignored `local-previews.json` only if you need machine-local previews. Review every configured source and asset before exposing it. Never place private evidence in the public root.
+
+For an optional macOS login service, copy `com.example.omo-evidence-gallery.plist.example` to your LaunchAgents directory, replace its generic label and paths with your own, set a persistent `EVIDENCE_ROOT`, and create the log directory before loading it with `launchctl bootstrap gui/$(id -u) /path/to/your.plist`. Keep host-specific paths and secrets out of Git.
+
+## Persistent Docker server
+
+Place a Dockerfile in a deployment workspace containing copies of `server.mjs` and `storage.mjs`, or use this checkout as the build context:
+
+```dockerfile
+FROM oven/bun:1.4
+WORKDIR /app
+COPY server.mjs storage.mjs ./
+ENV HOST=0.0.0.0 PORT=17678 EVIDENCE_ROOT=/data/gallery-public
+EXPOSE 17678
+CMD ["bun", "server.mjs"]
+```
+
+This image runs the HTTP gallery and upload endpoint. If you need configured local previews, supply a reviewed `local-previews.json` in the image or mount it separately. Keep any source files it references private and accessible only where intended. Grant the container's Bun user write access to the persistent volume.
+
+Create a Compose file in that workspace, keeping the token in an ignored `.env` or your secret manager:
+
+```yaml
+services:
+  gallery:
+    build: .
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 17678
+      EVIDENCE_ROOT: /data/gallery-public
+      UPLOAD_TOKEN: ${UPLOAD_TOKEN:?set a random upload token}
+      RETENTION_DAYS: ${RETENTION_DAYS:-30}
+      CLEANUP_INTERVAL_HOURS: ${CLEANUP_INTERVAL_HOURS:-24}
+    volumes:
+      - gallery-data:/data/gallery-public
+    networks:
+      - private
+
+volumes:
+  gallery-data:
+
+networks:
+  private:
+```
+
+Start with `docker compose up -d --build`. Keep the origin on a private network, with no published host port. Connect a reverse proxy or Cloudflare Tunnel container to that network and point it at `http://gallery:17678`. If the tunnel runs on the host instead, explicitly bind the origin to loopback rather than publishing it to all interfaces. Mount or back up the persistent volume as needed; rebuilding the image must not remove evidence.
+
+Set `UPLOAD_TOKEN` to a random secret to enable uploads. Without it, the upload endpoint returns 503. `RETENTION_DAYS` defaults to 30 and `CLEANUP_INTERVAL_HOURS` to 24; both must be positive. Cleanup runs on startup and periodically, removing only folders with expired server-generated `uploadedAt` metadata. Manually copied folders aren't subject to upload retention. `bun storage.mjs` runs cleanup once when the storage module is available.
+
+## Cloudflare Tunnel and Access
+
+In your own Cloudflare account, route `gallery.example.com` through a Tunnel to the private HTTP origin. Create an Access application for that hostname. Add an Allow policy for the exact email addresses or your organization's email domain, such as `example.org`. Include rules within one policy are alternatives, not cumulative conditions. Use separate policies if your access design needs different groups. Enable Access enforcement at the tunnel origin so bypassing the login page doesn't expose the gallery; also restrict direct origin reachability.
+
+For unattended uploads, create a dedicated Access service token and a Service Auth policy on the application. Configure the publisher with that token's client ID and secret. The headers alone don't authorize a request until the Service Auth policy exists. Human viewers use the Allow policy. Cloudflare Access and the upload bearer token serve different purposes: configure both for protected automated uploads. Don't commit credentials or copy private evidence into the published root.
+
+## Multipart uploads and remote MCP publisher
+
+Upload only reviewed files with a multipart `metadata` JSON field and repeated `files` fields. Relative filenames can preserve subdirectories for HTML assets. Requests are limited to 100 MiB and 200 files; unsafe paths and duplicate names are rejected. A completed upload returns HTTP 201 with a relative gallery `url`. Missing or incorrect bearer authorization returns 401; invalid metadata or paths return 400.
 
 ```sh
 curl --fail-with-body https://gallery.example.com/api/evidence \
@@ -18,22 +82,26 @@ curl --fail-with-body https://gallery.example.com/api/evidence \
   -F 'files=@screenshot.png;filename=assets/screenshot.png'
 ```
 
-For automation, create a dedicated Cloudflare Access service token and a Service Auth policy for the gallery. These headers do not grant access until that policy exists. Human accounts continue to use the domain Allow policy. Store upload and service-token secrets outside Git. A successful upload returns HTTP 201 with its gallery `url`; missing or incorrect upload authorization returns 401, and malformed metadata or paths return 400. Without `UPLOAD_TOKEN`, uploads are disabled (503).
+For an MCP client, copy `mcp.example.json` into your client configuration and set its script path to this checkout's absolute `mcp.mjs` path. Set `EVIDENCE_ROOT` to a local, publish-only staging directory. For the remote publisher, also set `EVIDENCE_SERVER_URL=https://gallery.example.com` and `UPLOAD_TOKEN`; set `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` when the Access application requires a service token. Configure these variables in your client or secret store, not in a tracked file. Review and stage the folder before calling `register_evidence`. Once remote publishing is installed and configured, it uploads staged files and returns a remote gallery URL. The server, Tunnel, Access policies, and tokens must be configured by the operator; this repository doesn't provision them.
 
-Run `bun server.mjs` to browse reviewed previews and the publish-only `~/.omo/evidence/gallery-public` directory on port 17678. The server binds to `0.0.0.0` by default, so use the machine's Tailscale address when browsing from another device. There is no authentication: only put non-sensitive, reviewable artifacts into `gallery-public`. All other evidence and other files in `~/.omo` stay outside the server's file root. To publish future work, put a reviewed artifact in `gallery-public` or configure a narrowly scoped preview in the ignored `local-previews.json`.
-
-For a Mac login service, copy the `.plist.example` file to `~/Library/LaunchAgents/com.example.omo-evidence-gallery.plist`, replace `YOUR_USER` with your local username, create its log directory, and load it with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.example.omo-evidence-gallery.plist`. Copy `local-previews.example.json` to `local-previews.json` for machine-local previews, and add only entries whose sources are safe to expose. Reload a changed LaunchAgent with `launchctl bootout gui/$(id -u)/com.example.omo-evidence-gallery` followed by the bootstrap command.
-
-## Main page and MCP registration
-
-The main page at `/` groups registered public evidence by Git repository name (the final part of its remote URL) and sorts projects and entries newest-created first. Missing local preview sources are omitted. Register a reviewed folder with the MCP tool to record its Git remote, title, labels, and categories as typed tags. The gallery reads `.gallery.json` on each request; no restart is needed. Older folders without registration still use their folder-name project and date, while configured previews can set `repository` and `date` in the ignored `local-previews.json` (or fall back to `project`/slug and source modification time). Registered evidence uses its first registration time (unchanged by re-registration); older evidence and previews use filesystem creation time, falling back to modification time when unavailable. The displayed date remains the publication date.
-
-Evidence folder pages display images, videos, and PDFs in filename order with previous/next buttons and left/right arrow keys. `?page=3` links directly to the third item, and browser Back returns to the previous selection. The file list remains available below the viewer for HTML pages and downloads. Configured multi-image previews use the same navigation.
-
-Run `bun mcp.mjs` as a **local stdio MCP server**. Copy `mcp.example.json` into your MCP client's server configuration and replace the placeholder with this checkout's absolute `mcp.mjs` path. The tool `register_evidence` accepts:
+Without a remote server URL, the local stdio tool registers an existing folder beneath `EVIDENCE_ROOT` and returns a relative `/evidence/<slug>/` URL. It doesn't accept a private source path or copy a private tree. Example tool arguments:
 
 ```json
-{"slug":"my-project-review-20260928","repository":"https://github.com/example/my-project.git","title":"Homepage review","labels":["desktop","reviewed"],"categories":["UI"]}
+{"slug":"my-project-review","repository":"https://github.com/example/my-project.git","title":"Homepage review","labels":["desktop","reviewed"],"categories":["UI"]}
 ```
 
-First copy only reviewed, non-sensitive assets into `~/.omo/evidence/gallery-public/my-project-review-20260928/`, then call the tool. HTTPS and `git@host:owner/repo.git` SSH remotes for the same Git repository share one project group. `date` is optional and defaults to today; labels and categories may be empty arrays. The tool labels that existing directory and returns `/evidence/my-project-review-20260928/`; it does **not** accept a source path or copy a private tree. Each folder may contain an `index.html` and relative assets. Open its `index.html` explicitly for a page; the directory URL shows a file listing. The HTTP server binds to all interfaces by default and has no authentication, so anything in the public root is already reachable even before registration. Do not put credentials, private material, or machine-specific paths there.
+The main page groups entries by Git repository and sorts newest entries first. Evidence pages show images, videos, and PDFs with previous and next navigation; `?page=3` links to the third item. An `index.html` in an evidence folder opens as a file, while its directory URL shows the listing. Anything placed in the public root can be served even before MCP registration. Keep local configuration and secrets ignored, and publish no private evidence.
+
+## Key-equipped computers
+
+Store client configuration in `~/.omo/evidence-client.json` (mode `600` on Unix), or set `EVIDENCE_CLIENT_CONFIG` to a private file. Use your own values; never commit the resulting file:
+
+```json
+{"EVIDENCE_SERVER_URL":"https://gallery.example.com","EVIDENCE_ROOT":"/path/to/reviewed-staging","UPLOAD_TOKEN":"<upload-secret>","CF_ACCESS_CLIENT_ID":"<service-client-id>","CF_ACCESS_CLIENT_SECRET":"<service-client-secret>"}
+```
+
+The MCP reads this file automatically; explicit environment variables take precedence. It verifies each published file against the source SHA-256 before returning an absolute remote URL. Remove disposable staging files only after successful verification; retain product source assets and test fixtures.
+
+Run `bun browse.mjs` on a key-equipped computer to browse without a manual Access login. Open the printed loopback URL on that computer. This read-only gateway adds service authentication to upstream requests and binds only `127.0.0.1`; it does not accept uploads, forward browser cookies, or expose the key to page scripts. A key file alone does not authenticate an ordinary browser request to the public hostname. Keep the gateway private and revoke its service token when retiring a computer. The public hostname still requires Access authentication for clients without a valid credential.
+
+For a persistent client, put `mcp.mjs`, `browse.mjs`, and `install-client.mjs` together in a private installation directory, create the credential file, then run `bun install-client.mjs`. It preserves other MCP servers while registering `evidence-viewer` and installs a user-level gateway service: LaunchAgent on macOS, systemd user service on Linux, or a logon task on Windows. Verify `http://127.0.0.1:17677/health` returns `{"status":"ok"}` without an interactive login. Services run as the installing user; start the user's desktop/session service manager before installing. Grant service tokens per computer where independent revocation is needed, and rotate expired or exposed credentials.
