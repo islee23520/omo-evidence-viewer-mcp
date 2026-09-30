@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtemp, mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -51,6 +51,8 @@ test("authenticated upload publishes nested assets and rejects unsafe paths", as
   const uploaded = await fetch(endpoint, { method: "POST", headers, body: payload() });
   expect(uploaded.status).toBe(201);
   const record = await uploaded.json();
+  expect(record.visibility).toBe("private");
+  expect((await fetch(`http://127.0.0.1:${port}/public/${record.slug}/assets/note.txt`)).status).toBe(404);
   expect(await (await fetch(`http://127.0.0.1:${port}${record.url}assets/note.txt`)).text()).toBe("uploaded proof");
   for (const filename of ["../secret.txt", "C:/secret.txt", "CON.txt", "assets/../secret.txt"]) {
     expect((await fetch(endpoint, { method: "POST", headers, body: payload(filename) })).status).toBe(400);
@@ -58,6 +60,29 @@ test("authenticated upload publishes nested assets and rejects unsafe paths", as
   const form = payload();
   form.append("files", new File(["duplicate"], "ASSETS/NOTE.TXT"));
   expect((await fetch(endpoint, { method: "POST", headers, body: form })).status).toBe(400);
+});
+
+test("public access is explicit and revocation covers pages and nested assets", async () => {
+  const form = new FormData();
+  form.set("metadata", JSON.stringify({ slug: "public-review", title: "Public review", repository: "https://github.com/example/public", visibility: "public" }));
+  form.append("files", new File(['<html><body><img src="assets/proof.svg"></body></html>'], "index.html"));
+  form.append("files", new File(['<svg xmlns="http://www.w3.org/2000/svg"></svg>'], "assets/proof.svg"));
+  const response = await fetch(`http://127.0.0.1:${port}/api/evidence`, { method: "POST", headers: { Authorization: "Bearer gallery-test-token" }, body: form });
+  expect(response.status).toBe(201);
+  const record = await response.json();
+  expect(record.url).toStartWith("/public/");
+  const base = `http://127.0.0.1:${port}${record.url}`;
+  expect((await fetch(base + "index.html")).status).toBe(200);
+  expect((await fetch(base + "assets/proof.svg")).status).toBe(200);
+  await symlink(join(home, ".omo/evidence/gallery-public/alpha-review-20260928/index.html"), join(home, ".omo/evidence/gallery-public", record.slug, "private-link.html"));
+  expect((await fetch(base + "private-link.html")).status).toBe(404);
+  expect((await fetch(base + "index.html")).headers.get("cache-control")).toBe("no-store");
+  const visibilityUrl = `http://127.0.0.1:${port}/api/evidence/${record.slug}/visibility`;
+  expect((await fetch(visibilityUrl, { method: "PATCH", body: JSON.stringify({ visibility: "private" }) })).status).toBe(401);
+  expect((await fetch(visibilityUrl, { method: "PATCH", headers: { Authorization: "Bearer gallery-test-token", "Content-Type": "application/json" }, body: JSON.stringify({ visibility: "private" }) })).status).toBe(200);
+  expect((await fetch(base + "index.html")).status).toBe(404);
+  expect((await fetch(base + "assets/proof.svg")).status).toBe(404);
+  expect((await fetch(`http://127.0.0.1:${port}/public/alpha-review-20260928/index.html`)).status).toBe(404);
 });
 
 test("retention deletes expired uploads but preserves fresh and legacy evidence", async () => {

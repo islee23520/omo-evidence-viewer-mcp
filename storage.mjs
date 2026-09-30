@@ -25,13 +25,26 @@ export async function cleanupEvidence(now = Date.now()) {
   return removed;
 }
 
-export async function uploadEvidence(request) {
+export async function uploadEvidence(request, existingSlug) {
   const token = process.env.UPLOAD_TOKEN;
   if (!token) return Response.json({ error: "Uploads are disabled" }, { status: 503 });
   const supplied = Buffer.from(request.headers.get("authorization") || "");
   const expected = Buffer.from(`Bearer ${token}`);
   if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
+  }
+  if (existingSlug !== undefined) {
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(existingSlug)) return Response.json({ error: "Invalid slug" }, { status: 400 });
+    let visibility;
+    try { ({ visibility } = await request.json()); } catch { return Response.json({ error: "Invalid JSON" }, { status: 400 }); }
+    if (!["private", "public"].includes(visibility)) return Response.json({ error: "Visibility must be private or public" }, { status: 400 });
+    const path = resolve(evidenceRoot, existingSlug, ".gallery.json");
+    if (!(await Bun.file(path).exists())) return Response.json({ error: "Not found" }, { status: 404 });
+    const record = await Bun.file(path).json();
+    record.visibility = visibility;
+    record.updatedAt = new Date().toISOString();
+    await writeFile(path, JSON.stringify(record, null, 2) + "\n");
+    return Response.json({ slug: existingSlug, url: `${visibility === "public" ? "/public/" : "/evidence/"}${existingSlug}/`, ...record }, { headers: { "Cache-Control": "no-store" } });
   }
   let form, metadata;
   try {
@@ -40,7 +53,8 @@ export async function uploadEvidence(request) {
   } catch {
     return Response.json({ error: "Expected multipart files and JSON metadata" }, { status: 400 });
   }
-  const { slug, title, repository, labels = [], categories = [] } = metadata ?? {};
+  const { slug, title, repository, labels = [], categories = [], visibility = "private" } = metadata ?? {};
+  if (!["private", "public"].includes(visibility)) return Response.json({ error: "Visibility must be private or public" }, { status: 400 });
   let canonicalRepository;
   try { canonicalRepository = githubRepository(repository); } catch (error) { return Response.json({ error: error.message }, { status: 400 }); }
   const files = form.getAll("files");
@@ -68,12 +82,12 @@ export async function uploadEvidence(request) {
       await writeFile(destination, Buffer.from(await file.arrayBuffer()), { flag: "wx" });
     }
     const timestamp = new Date().toISOString();
-    const record = { title: title.trim(), repository: canonicalRepository,
+    const record = { title: title.trim(), repository: canonicalRepository, visibility,
       date: timestamp.slice(0, 10), createdAt: timestamp, updatedAt: timestamp, uploadedAt: timestamp,
       tags: [...labels.map(value => ({ type: "label", value: value.trim() })), ...categories.map(value => ({ type: "category", value: value.trim() }))] };
     await writeFile(resolve(staging, ".gallery.json"), JSON.stringify(record, null, 2) + "\n");
     await rename(staging, resolve(evidenceRoot, id));
-    return Response.json({ slug: id, url: `/evidence/${id}/`, ...record }, { status: 201 });
+    return Response.json({ slug: id, url: `${visibility === "public" ? "/public/" : "/evidence/"}${id}/`, ...record }, { status: 201 });
   } finally {
     await rm(staging, { recursive: true, force: true });
   }

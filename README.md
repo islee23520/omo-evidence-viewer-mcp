@@ -94,6 +94,12 @@ Registration requires a GitHub repository URL, either `https://github.com/owner/
 
 ## Key-equipped computers
 
+## Private and public entries
+
+Uploads and MCP registration accept `visibility`, either `private` (the default) or `public`. Existing metadata without this field remains private. The gallery index and `/evidence/` routes must stay behind the operator's authentication proxy. Explicitly public entries are available through `/public/<slug>/` and their nested asset paths; private entries return 404 through that route. Public links do not expose a gallery index. Configure an authentication exception for `/public/*` only, and route that exception to the same server so it checks visibility on every request. Never bypass authentication for the whole hostname. Disable intermediary caching for this route so revocation takes effect.
+
+An authenticated publisher can change an existing entry using `PATCH /api/evidence/<slug>/visibility` with the upload bearer token and JSON `{"visibility":"public"}` or `{"visibility":"private"}`. Changing back to private disables both the public page and all public asset paths. Private viewing still requires the configured viewer authentication; the upload token is not a browser login.
+
 Store client configuration in `~/.omo/evidence-client.json` (mode `600` on Unix), or set `EVIDENCE_CLIENT_CONFIG` to a private file. Use your own values; never commit the resulting file:
 
 ```json

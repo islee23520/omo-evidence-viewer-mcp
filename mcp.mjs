@@ -27,6 +27,7 @@ const tool = {
       title: { type: "string", description: "Entry title shown in the gallery list." },
       labels: { type: "array", items: { type: "string" }, description: "Label tags for this entry." },
       categories: { type: "array", items: { type: "string" }, description: "Category tags for this entry." },
+      visibility: { type: "string", enum: ["private", "public"], default: "private", description: "Private by default. Public explicitly permits unauthenticated page and asset access." },
     },
     required: ["slug", "repository", "title", "labels", "categories"],
     additionalProperties: false,
@@ -34,7 +35,8 @@ const tool = {
 };
 
 async function register(args) {
-  const { slug, repository, project, date, title, labels = [], categories = [] } = args ?? {};
+  const { slug, repository, project, date, title, labels = [], categories = [], visibility = "private" } = args ?? {};
+  if (!["private", "public"].includes(visibility)) throw new Error("Visibility must be private or public");
   if (typeof slug !== "string" || !slugPattern.test(slug)) throw new Error("Invalid slug");
   if (typeof title !== "string" || !title.trim() || title.length > 160) throw new Error("Title is required and must be short text");
   if (repository !== undefined && (typeof repository !== "string" || !/^(?:https:\/\/[^\s/@]+(?:\/[^\s]+)+|git@[^\s:]+:[^\s/]+\/[^\s]+)$/.test(repository) || repository.length > 300)) throw new Error("Repository must be a Git HTTPS or SSH remote URL");
@@ -58,7 +60,7 @@ async function register(args) {
   } catch (cause) {
     if (cause.code !== "ENOENT") throw cause;
   }
-  const record = { ...(canonicalRepository ? { repository: canonicalRepository } : { project: project.trim() }), date: publicationDate, title: title.trim(), tags, createdAt: createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const record = { ...(canonicalRepository ? { repository: canonicalRepository } : { project: project.trim() }), visibility, date: publicationDate, title: title.trim(), tags, createdAt: createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
   if (process.env.EVIDENCE_SERVER_URL) {
     if (!canonicalRepository) throw new Error("Remote publication requires a repository URL");
     if (!process.env.UPLOAD_TOKEN) throw new Error("Remote publication requires UPLOAD_TOKEN");
@@ -70,7 +72,7 @@ async function register(args) {
       headers["CF-Access-Client-Secret"] = process.env.CF_ACCESS_CLIENT_SECRET;
     }
     const form = new FormData();
-    form.set("metadata", JSON.stringify({ slug, repository: canonicalRepository, title, labels, categories }));
+    form.set("metadata", JSON.stringify({ slug, repository: canonicalRepository, title, labels, categories, visibility }));
     const assets = [];
     async function collect(directory, prefix = "") {
       for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -90,7 +92,7 @@ async function register(args) {
     if (!response.ok) throw new Error(`Remote upload failed (${response.status})`);
     const published = await response.json();
     const url = new URL(published.url, base);
-    if (url.origin !== base.origin || !url.pathname.startsWith("/evidence/")) throw new Error("Invalid remote evidence URL");
+    if (url.origin !== base.origin || !url.pathname.startsWith(visibility === "public" ? "/public/" : "/evidence/")) throw new Error("Invalid remote evidence URL");
     for (const asset of assets) {
       const assetUrl = new URL(asset.name.split("/").map(encodeURIComponent).join("/"), url);
       assetUrl.searchParams.set("raw", "1");
@@ -100,7 +102,7 @@ async function register(args) {
     return { ...published, url: url.href, verifiedFiles: assets.length };
   }
   await writeFile(metadata, JSON.stringify(record, null, 2) + "\n", { flag: "w" });
-  return { url: `/evidence/${encodeURIComponent(slug)}/`, ...record };
+  return { url: `${visibility === "public" ? "/public/" : "/evidence/"}${encodeURIComponent(slug)}/`, ...record };
 }
 
 const input = createInterface({ input: process.stdin, crlfDelay: Infinity });

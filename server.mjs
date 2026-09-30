@@ -148,6 +148,25 @@ const server = Bun.serve({ hostname: host, port, maxRequestBodySize: 100 * 1024 
   const path = new URL(request.url).pathname;
   if (path === "/health") return Response.json({ status: "ok" });
   if (path === "/api/evidence" && request.method === "POST") return uploadEvidence(request);
+  const visibilityPath = /^\/api\/evidence\/([a-z0-9-]+)\/visibility$/.exec(path);
+  if (visibilityPath && request.method === "PATCH") return uploadEvidence(request, visibilityPath[1]);
+  if (path.startsWith("/public/")) {
+    let parts;
+    try { parts = path.slice(8).split("/").filter(Boolean).map(decodeURIComponent); } catch { return new Response("Not found", { status: 404 }); }
+    if (!parts.length || parts.some(part => !part || part.startsWith(".") || /[\\/]/.test(part))) return new Response("Not found", { status: 404 });
+    try {
+      const entryRoot = await realpath(resolve(evidenceRoot, parts[0]));
+      const publicTarget = await realpath(resolve(entryRoot, ...parts.slice(1)));
+      const withinEntry = relative(entryRoot, publicTarget);
+      if (withinEntry.startsWith("..") || isAbsolute(withinEntry)) return new Response("Not found", { status: 404 });
+      const metadata = await Bun.file(resolve(evidenceRoot, parts[0], ".gallery.json")).json();
+      if (metadata.visibility !== "public") return new Response("Not found", { status: 404 });
+    } catch { return new Response("Not found", { status: 404 }); }
+    const response = await evidencePage(parts, new URL(request.url).searchParams.get("raw") === "1");
+    const headers = new Headers(response.headers);
+    headers.set("Cache-Control", "no-store");
+    return new Response(response.body, { status: response.status, headers });
+  }
   if (path === "/") return indexPage();
   if (path.startsWith("/evidence/")) return evidencePage(path.slice(10).split("/").filter(Boolean).map(decodeURIComponent), new URL(request.url).searchParams.get("raw") === "1");
   const companyPath = companyLayout && `/preview/${companyLayout.slug}/`;
