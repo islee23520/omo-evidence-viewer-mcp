@@ -2,7 +2,7 @@
 local-previews.json
 *.log
 .DS_Store
-com.example.omo-evidence-gallery.plist
+*.plist
 .omo/
 evidence-client.json
 .env

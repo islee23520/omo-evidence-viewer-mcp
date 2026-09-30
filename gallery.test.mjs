@@ -16,6 +16,8 @@ beforeAll(async () => {
   await writeFile(join(root, "alpha-review-20260928/index.html"), "<h1>Alpha review</h1>");
   await writeFile(join(root, "alpha-review-20260927/index.html"), "<h1>Earlier review</h1>");
   await writeFile(join(root, "beta-review-20260926/index.html"), "<h1>Beta review</h1>");
+  for (const name of ["alpha-review-20260928", "alpha-review-20260927"]) await writeFile(join(root, name, ".gallery.json"), JSON.stringify({ repository: "https://github.com/example/alpha" }));
+  await writeFile(join(root, "beta-review-20260926/.gallery.json"), JSON.stringify({ repository: "https://github.com/example/beta" }));
   await writeFile(join(root, "alpha-review-20260928/01-first.png"), "first");
   await writeFile(join(root, "alpha-review-20260928/02-clip.mp4"), "clip");
   await writeFile(join(root, "alpha-review-20260928/03-notes.pdf"), "pdf");
@@ -43,6 +45,9 @@ test("authenticated upload publishes nested assets and rejects unsafe paths", as
   const endpoint = `http://127.0.0.1:${port}/api/evidence`;
   expect((await fetch(endpoint, { method: "POST", body: payload() })).status).toBe(401);
   const headers = { Authorization: "Bearer gallery-test-token" };
+  const invalidRepository = payload();
+  invalidRepository.set("metadata", JSON.stringify({ slug: "invalid-repository", title: "Invalid repository", repository: "https://example.com/team/project" }));
+  expect((await fetch(endpoint, { method: "POST", headers, body: invalidRepository })).status).toBe(400);
   const uploaded = await fetch(endpoint, { method: "POST", headers, body: payload() });
   expect(uploaded.status).toBe(201);
   const record = await uploaded.json();
@@ -91,16 +96,17 @@ test("remote MCP publication verifies assets and returns an absolute remote URL"
   const published = responses[1].result.structuredContent;
   expect(published.url).toStartWith(`http://127.0.0.1:${port}/evidence/`);
   expect(published.verifiedFiles).toBe(1);
-  expect(await (await fetch(published.url + "index.html")).text()).toBe("<h1>Remote proof</h1>");
+  expect(await (await fetch(published.url + "index.html?raw=1")).text()).toBe("<h1>Remote proof</h1>");
+  expect(await (await fetch(published.url + "index.html")).text()).toContain('data-gallery-home');
 });
 
-test("groups legacy evidence by project while links remain live", async () => {
+test("groups evidence by repository while links remain live", async () => {
   // Given three public folders across two projects.
   // When a visitor requests the gallery index.
   const page = await (await fetch(`http://127.0.0.1:${port}/`)).text();
   // Then each appears once in a project group.
-  expect(page).toContain("<h2>alpha-review</h2>");
-  expect(page).toContain("<h2>beta</h2>");
+  expect(page).toContain("<h2>example/alpha</h2>");
+  expect(page).toContain("<h2>example/beta</h2>");
   expect((page.match(/href="\/evidence\/alpha-review-20260928\/"/g) || []).length).toBe(1);
   expect((await fetch(`http://127.0.0.1:${port}/evidence/alpha-review-20260928/index.html`)).status).toBe(200);
 });
@@ -159,13 +165,13 @@ test("registration groups repository names, orders creations, displays typed tag
   await utimes(join(root, "alpha-review-20260928"), old, old);
   await utimes(join(root, "alpha-review-20260927"), recent, recent);
   await utimes(join(root, "beta-review-20260926"), old, old);
-  await writeFile(join(root, "beta-review-20260926/.gallery.json"), JSON.stringify({ project: "beta", createdAt: "2026-09-20T00:00:00.000Z" }));
+  await writeFile(join(root, "beta-review-20260926/.gallery.json"), JSON.stringify({ repository: "https://github.com/example/beta", createdAt: "2026-09-20T00:00:00.000Z" }));
   expect(metadata.tags).toEqual(replies[2].result.structuredContent.tags);
   const page = await (await fetch(`http://127.0.0.1:${port}/`)).text();
-  expect((page.match(/<h2>alpha<\/h2>/g) || []).length).toBe(1);
+  expect((page.match(/<h2>example\/alpha<\/h2>/g) || []).length).toBe(1);
   expect(page).toContain("Homepage audit");
   expect(page).toContain("라벨 · Reviewed");
   expect(page).toContain("카테고리 · UI");
   expect(page.indexOf("Homepage audit")).toBeLessThan(page.indexOf("Earlier audit"));
-  expect(page.indexOf("<h2>alpha</h2>")).toBeLessThan(page.indexOf("<h2>beta</h2>"));
+  expect(page.indexOf("<h2>example/alpha</h2>")).toBeLessThan(page.indexOf("<h2>example/beta</h2>"));
 });

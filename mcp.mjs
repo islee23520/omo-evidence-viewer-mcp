@@ -2,6 +2,7 @@ import { lstat, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { isAbsolute, relative, resolve } from "node:path";
 import { homedir } from "node:os";
+import { githubRepository } from "./repository.mjs";
 
 const clientConfigPath = process.env.EVIDENCE_CLIENT_CONFIG || resolve(homedir(), ".omo/evidence-client.json");
 if (await Bun.file(clientConfigPath).exists()) {
@@ -41,7 +42,7 @@ async function register(args) {
   const publicationDate = date ?? new Date().toISOString().slice(0, 10);
   if (typeof publicationDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(publicationDate) || Number.isNaN(Date.parse(publicationDate)) || new Date(publicationDate).toISOString().slice(0, 10) !== publicationDate) throw new Error("Invalid date; use YYYY-MM-DD");
   if (![labels, categories].every(values => Array.isArray(values) && values.length <= 20 && values.every(value => typeof value === "string" && value.trim() && value.length <= 40))) throw new Error("Labels and categories must be arrays of short, nonempty tags");
-  const canonicalRepository = repository?.trim().replace(/^git@([^:]+):/, "https://$1/").replace(/\.git\/?$/, "").replace(/\/$/, "").toLowerCase();
+  const canonicalRepository = githubRepository(repository);
   const tags = [...labels.map(value => ({ type: "label", value: value.trim() })), ...categories.map(value => ({ type: "category", value: value.trim() }))];
   const folder = resolve(root, slug);
   const actualRoot = await realpath(root);
@@ -91,7 +92,9 @@ async function register(args) {
     const url = new URL(published.url, base);
     if (url.origin !== base.origin || !url.pathname.startsWith("/evidence/")) throw new Error("Invalid remote evidence URL");
     for (const asset of assets) {
-      const fetched = await fetch(new URL(asset.name.split("/").map(encodeURIComponent).join("/"), url), { headers, redirect: "error" });
+      const assetUrl = new URL(asset.name.split("/").map(encodeURIComponent).join("/"), url);
+      assetUrl.searchParams.set("raw", "1");
+      const fetched = await fetch(assetUrl, { headers, redirect: "error" });
       if (!fetched.ok || Bun.SHA256.hash(await fetched.arrayBuffer(), "hex") !== asset.hash) throw new Error(`Remote verification failed: ${asset.name}`);
     }
     return { ...published, url: url.href, verifiedFiles: assets.length };

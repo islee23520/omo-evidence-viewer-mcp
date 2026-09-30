@@ -90,7 +90,7 @@ Without a remote server URL, the local stdio tool registers an existing folder b
 {"slug":"my-project-review","repository":"https://github.com/example/my-project.git","title":"Homepage review","labels":["desktop","reviewed"],"categories":["UI"]}
 ```
 
-The main page groups entries by Git repository and sorts newest entries first. Evidence pages show images, videos, and PDFs with previous and next navigation; `?page=3` links to the third item. An `index.html` in an evidence folder opens as a file, while its directory URL shows the listing. Anything placed in the public root can be served even before MCP registration. Keep local configuration and secrets ignored, and publish no private evidence.
+Registration requires a GitHub repository URL, either `https://github.com/owner/repository` or `git@github.com:owner/repository.git`. The main page groups entries by canonical `owner/repository`, not folder name, and sorts newest entries first. Entries without a valid repository are omitted from the index. Evidence pages show images, videos, and PDFs with previous and next navigation; `?page=3` links to the third item. Served HTML files include a fixed gallery-home link; `?raw=1` returns original bytes for integrity verification. An `index.html` opens as a file, while its directory URL shows the listing. Keep local configuration and secrets ignored, and publish no private evidence.
 
 ## Key-equipped computers
 

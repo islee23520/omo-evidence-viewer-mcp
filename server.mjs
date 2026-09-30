@@ -1,6 +1,7 @@
 import { lstat, readdir, realpath, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute, relative, resolve } from "node:path";
 import { cleanupEvidence, evidenceRoot, uploadEvidence } from "./storage.mjs";
+import { githubRepository } from "./repository.mjs";
 
 const port = Number(process.env.PORT || 17678);
 const host = process.env.HOST || "0.0.0.0";
@@ -49,7 +50,14 @@ async function fileInside(root, parts) {
   }
 }
 
-function sendFile(path) {
+function sendFile(path, raw = false) {
+  if (!raw && extname(path).toLowerCase() === ".html") {
+    return Bun.file(path).text().then(html => {
+      const link = '<a href="/" data-gallery-home style="position:fixed;right:16px;bottom:16px;z-index:2147483647;padding:10px 16px;border-radius:24px;background:#282044;color:white;font:14px system-ui;text-decoration:none;box-shadow:0 2px 12px #0004">갤러리 홈</a>';
+      const page = /<body(?:\s|>)/i.test(html) ? html.replace(/<body([^>]*)>/i, `<body$1>${link}`) : html + link;
+      return new Response(page, { headers: { "Content-Type": types[".html"], "X-Content-Type-Options": "nosniff" } });
+    });
+  }
   return new Response(Bun.file(path), { headers: { "Content-Type": types[extname(path).toLowerCase()] || "application/octet-stream", "X-Content-Type-Options": "nosniff" } });
 }
 
@@ -84,8 +92,10 @@ async function indexPage() {
       if ((await lstat(registered)).isFile()) metadata = await Bun.file(registered).json();
     } catch { /* Older folders or invalid metadata fall back to the folder name. */ }
     const prefix = entry.name.split("-").slice(0, 2).join("-");
+    let repository;
+    try { repository = githubRepository(metadata.repository); } catch { return null; }
     return {
-      project: typeof metadata.repository === "string" && metadata.repository ? metadata.repository.replace(/\.git\/?$/, "").replace(/\/$/, "").split(/[/:]/).at(-1) : (typeof metadata.project === "string" && metadata.project ? metadata.project : (prefixCounts.get(prefix) > 1 ? prefix : entry.name.split("-")[0])),
+      project: repository.replace("https://github.com/", ""),
       date: typeof metadata.date === "string" && metadata.date ? metadata.date : fallbackDate(entry.name, info.mtime),
       created: Date.parse(metadata.createdAt) || info.birthtimeMs || info.mtimeMs,
       title: typeof metadata.title === "string" && metadata.title ? metadata.title : entry.name,
@@ -93,7 +103,7 @@ async function indexPage() {
       href: `/evidence/${encodeURIComponent(entry.name)}/`,
       kind: "Evidence",
     };
-  }));
+  })).then(items => items.filter(Boolean));
   for (const item of [...previews, companyLayout, companyDeckPdf].filter(Boolean)) {
     const source = item.source || item.root;
     const info = source ? await stat(source).catch(() => null) : null;
@@ -109,7 +119,7 @@ async function indexPage() {
   return new Response(`<!doctype html><html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OmO Evidence Gallery</title><style>:root{color-scheme:light}body{font:16px/1.55 system-ui;margin:0;background:#f5f3f9;color:#282044}main{max-width:960px;margin:auto;padding:48px 24px 96px}header{border-bottom:1px solid #d9d3e5;padding-bottom:24px;margin-bottom:36px}h1{font-size:clamp(2rem,5vw,3rem);letter-spacing:-.04em;margin:0 0 8px}p{color:#625a73;margin:0;max-width:65ch}h2{font-size:1.45rem;margin:0 0 16px}.project{background:#fff;border:1px solid #e7e1ef;border-radius:16px;padding:24px;margin:20px 0;box-shadow:0 8px 24px #2820440a}ul{list-style:none;padding:0;margin:0}li{display:flex;align-items:baseline;justify-content:space-between;gap:16px;padding:10px 0;border-top:1px solid #eeeaf3;overflow-wrap:anywhere}a{color:#5336a5;text-decoration:none;font-weight:550}a:hover{text-decoration:underline}a:focus-visible{outline:2px solid #5336a5;outline-offset:3px}li>span{color:#746b84;font-size:.8rem;white-space:nowrap}.tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}.tag{font-size:.75rem;color:#5336a5;background:#eee8fa;border-radius:999px;padding:2px 8px}.tag.category{color:#17665b;background:#e1f4ef}@media(max-width:600px){main{padding:32px 16px 64px}.project{padding:18px}li{align-items:start;flex-direction:column;gap:4px}}</style><main><header><h1>OmO Evidence Gallery</h1><p>검토용 공개 증거를 Git 저장소별로 묶고 나중에 만든 항목부터 표시합니다. 이 서버는 인증 기능이 없으므로 공개 가능한 자료만 등록하세요.</p></header>${sections || "<p>아직 등록된 증거가 없습니다.</p>"}</main></html>`, { headers: { "Content-Type": "text/html; charset=utf-8", "X-Content-Type-Options": "nosniff" } });
 }
 
-async function evidencePage(parts) {
+async function evidencePage(parts, raw = false) {
   if (parts.some(part => !part || part === "." || part === ".." || part.startsWith("."))) return new Response("Not found", { status: 404 });
   const root = resolve(evidenceRoot, ...parts);
   const rel = relative(evidenceRoot, root);
@@ -118,7 +128,7 @@ async function evidencePage(parts) {
     const real = await realpath(root);
     const inside = relative(await realpath(evidenceRoot), real);
     if (inside.startsWith("..") || isAbsolute(inside)) return new Response("Not found", { status: 404 });
-    if ((await stat(real)).isFile()) return sendFile(real);
+    if ((await stat(real)).isFile()) return sendFile(real, raw);
     const entries = await readdir(real, { withFileTypes: true });
     const visible = entries.filter(x => !x.name.startsWith(".") && (x.isDirectory() || x.isFile())).sort((a, b) => a.name.localeCompare(b.name, "en", { numeric: true }));
     const media = visible.filter(x => x.isFile() && (imageTypes.has(extname(x.name).toLowerCase()) || videoTypes.has(extname(x.name).toLowerCase()) || extname(x.name).toLowerCase() === ".pdf")).map(x => ({ name: x.name, href: encodeURIComponent(x.name), kind: imageTypes.has(extname(x.name).toLowerCase()) ? "image" : videoTypes.has(extname(x.name).toLowerCase()) ? "video" : "pdf" }));
@@ -139,7 +149,7 @@ const server = Bun.serve({ hostname: host, port, maxRequestBodySize: 100 * 1024 
   if (path === "/health") return Response.json({ status: "ok" });
   if (path === "/api/evidence" && request.method === "POST") return uploadEvidence(request);
   if (path === "/") return indexPage();
-  if (path.startsWith("/evidence/")) return evidencePage(path.slice(10).split("/").filter(Boolean).map(decodeURIComponent));
+  if (path.startsWith("/evidence/")) return evidencePage(path.slice(10).split("/").filter(Boolean).map(decodeURIComponent), new URL(request.url).searchParams.get("raw") === "1");
   const companyPath = companyLayout && `/preview/${companyLayout.slug}/`;
   if (path === companyPath) {
     const images = companyLayout.images.map((image, i) => ({ name: i === 0 ? "데스크톱 · 1440px" : "모바일 · 390px", href: image, kind: "image" }));

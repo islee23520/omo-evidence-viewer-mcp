@@ -2,6 +2,7 @@ import { mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { timingSafeEqual } from "node:crypto";
+import { githubRepository } from "./repository.mjs";
 
 export const evidenceRoot = resolve(process.env.EVIDENCE_ROOT || resolve(homedir(), ".omo/evidence/gallery-public"));
 export const retentionDays = Number(process.env.RETENTION_DAYS || 30);
@@ -40,6 +41,8 @@ export async function uploadEvidence(request) {
     return Response.json({ error: "Expected multipart files and JSON metadata" }, { status: 400 });
   }
   const { slug, title, repository, labels = [], categories = [] } = metadata ?? {};
+  let canonicalRepository;
+  try { canonicalRepository = githubRepository(repository); } catch (error) { return Response.json({ error: error.message }, { status: 400 }); }
   const files = form.getAll("files");
   if (typeof slug !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug) || slug.length > 80 ||
       typeof title !== "string" || !title.trim() || title.length > 160 ||
@@ -65,7 +68,7 @@ export async function uploadEvidence(request) {
       await writeFile(destination, Buffer.from(await file.arrayBuffer()), { flag: "wx" });
     }
     const timestamp = new Date().toISOString();
-    const record = { title: title.trim(), repository: repository.replace(/\.git\/?$/, "").replace(/\/$/, "").toLowerCase(),
+    const record = { title: title.trim(), repository: canonicalRepository,
       date: timestamp.slice(0, 10), createdAt: timestamp, updatedAt: timestamp, uploadedAt: timestamp,
       tags: [...labels.map(value => ({ type: "label", value: value.trim() })), ...categories.map(value => ({ type: "category", value: value.trim() }))] };
     await writeFile(resolve(staging, ".gallery.json"), JSON.stringify(record, null, 2) + "\n");
