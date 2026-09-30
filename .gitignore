@@ -4,3 +4,6 @@ local-previews.json
 .DS_Store
 com.example.omo-evidence-gallery.plist
 .omo/
+evidence-client.json
+.env
+.env.*

@@ -3,12 +3,19 @@ import { createInterface } from "node:readline";
 import { isAbsolute, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 
+const clientConfigPath = process.env.EVIDENCE_CLIENT_CONFIG || resolve(homedir(), ".omo/evidence-client.json");
+if (await Bun.file(clientConfigPath).exists()) {
+  const config = await Bun.file(clientConfigPath).json();
+  for (const key of ["EVIDENCE_SERVER_URL", "UPLOAD_TOKEN", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "EVIDENCE_ROOT"]) {
+    if (process.env[key] === undefined && typeof config[key] === "string") process.env[key] = config[key];
+  }
+}
 const root = resolve(process.env.EVIDENCE_ROOT || resolve(homedir(), ".omo/evidence/gallery-public"));
 const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const tool = {
   name: "register_evidence",
   title: "Register public gallery evidence",
-  description: "Register an existing, reviewed public folder under its Git repository with a title, label tags, and category tags. Does not copy private files.",
+  description: "Publish a reviewed staging folder to the configured remote gallery, or register it locally when no remote is configured. Never include private files.",
   inputSchema: {
     type: "object",
     properties: {
@@ -51,6 +58,44 @@ async function register(args) {
     if (cause.code !== "ENOENT") throw cause;
   }
   const record = { ...(canonicalRepository ? { repository: canonicalRepository } : { project: project.trim() }), date: publicationDate, title: title.trim(), tags, createdAt: createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
+  if (process.env.EVIDENCE_SERVER_URL) {
+    if (!canonicalRepository) throw new Error("Remote publication requires a repository URL");
+    if (!process.env.UPLOAD_TOKEN) throw new Error("Remote publication requires UPLOAD_TOKEN");
+    const base = new URL(process.env.EVIDENCE_SERVER_URL);
+    if (base.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(base.hostname)) throw new Error("Remote publication requires HTTPS");
+    const headers = { Authorization: `Bearer ${process.env.UPLOAD_TOKEN}` };
+    if (process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET) {
+      headers["CF-Access-Client-Id"] = process.env.CF_ACCESS_CLIENT_ID;
+      headers["CF-Access-Client-Secret"] = process.env.CF_ACCESS_CLIENT_SECRET;
+    }
+    const form = new FormData();
+    form.set("metadata", JSON.stringify({ slug, repository: canonicalRepository, title, labels, categories }));
+    const assets = [];
+    async function collect(directory, prefix = "") {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        if (entry.name.startsWith(".")) continue;
+        const path = resolve(directory, entry.name);
+        const name = prefix + entry.name;
+        if (entry.isDirectory()) await collect(path, name + "/");
+        else if (entry.isFile()) {
+          const file = Bun.file(path);
+          form.append("files", file, name);
+          assets.push({ name, hash: Bun.SHA256.hash(await file.arrayBuffer(), "hex") });
+        } else throw new Error("Publication does not accept symlinks or special files");
+      }
+    }
+    await collect(actual);
+    const response = await fetch(new URL("/api/evidence", base), { method: "POST", headers, body: form, redirect: "error" });
+    if (!response.ok) throw new Error(`Remote upload failed (${response.status})`);
+    const published = await response.json();
+    const url = new URL(published.url, base);
+    if (url.origin !== base.origin || !url.pathname.startsWith("/evidence/")) throw new Error("Invalid remote evidence URL");
+    for (const asset of assets) {
+      const fetched = await fetch(new URL(asset.name.split("/").map(encodeURIComponent).join("/"), url), { headers, redirect: "error" });
+      if (!fetched.ok || Bun.SHA256.hash(await fetched.arrayBuffer(), "hex") !== asset.hash) throw new Error(`Remote verification failed: ${asset.name}`);
+    }
+    return { ...published, url: url.href, verifiedFiles: assets.length };
+  }
   await writeFile(metadata, JSON.stringify(record, null, 2) + "\n", { flag: "w" });
   return { url: `/evidence/${encodeURIComponent(slug)}/`, ...record };
 }

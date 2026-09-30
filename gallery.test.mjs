@@ -71,6 +71,29 @@ test("retention deletes expired uploads but preserves fresh and legacy evidence"
   expect((await fetch(`http://127.0.0.1:${port}/evidence/alpha-review-20260928/index.html`)).status).toBe(200);
 });
 
+test("remote MCP publication verifies assets and returns an absolute remote URL", async () => {
+  const staging = join(home, "remote-staging");
+  await mkdir(join(staging, "remote-proof"), { recursive: true });
+  await writeFile(join(staging, "remote-proof", "index.html"), "<h1>Remote proof</h1>");
+  const child = Bun.spawn(["bun", "mcp.mjs"], {
+    cwd: import.meta.dir,
+    env: { ...process.env, HOME: home, EVIDENCE_CLIENT_CONFIG: join(home, "absent.json"), EVIDENCE_ROOT: staging, EVIDENCE_SERVER_URL: `http://127.0.0.1:${port}`, UPLOAD_TOKEN: "gallery-test-token" },
+    stdin: "pipe", stdout: "pipe", stderr: "pipe",
+  });
+  child.stdin.write([
+    { jsonrpc: "2.0", id: 1, method: "initialize" },
+    { jsonrpc: "2.0", method: "notifications/initialized" },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "register_evidence", arguments: { slug: "remote-proof", repository: "https://github.com/example/remote", title: "Remote review", labels: [], categories: [] } } },
+  ].map(JSON.stringify).join("\n") + "\n");
+  child.stdin.end();
+  const responses = (await new Response(child.stdout).text()).trim().split("\n").map(JSON.parse);
+  expect(await child.exited).toBe(0);
+  const published = responses[1].result.structuredContent;
+  expect(published.url).toStartWith(`http://127.0.0.1:${port}/evidence/`);
+  expect(published.verifiedFiles).toBe(1);
+  expect(await (await fetch(published.url + "index.html")).text()).toBe("<h1>Remote proof</h1>");
+});
+
 test("groups legacy evidence by project while links remain live", async () => {
   // Given three public folders across two projects.
   // When a visitor requests the gallery index.
@@ -99,7 +122,7 @@ test("evidence folder includes ordered image, video and PDF pages without replac
 
 test("registration groups repository names, orders creations, displays typed tags, and rejects traversal", async () => {
   // Given a local MCP server pointed at the isolated public root.
-  const child = Bun.spawn(["bun", "mcp.mjs"], { cwd: import.meta.dir, env: { ...process.env, HOME: home }, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  const child = Bun.spawn(["bun", "mcp.mjs"], { cwd: import.meta.dir, env: { ...process.env, HOME: home, EVIDENCE_CLIENT_CONFIG: join(home, "absent.json"), EVIDENCE_SERVER_URL: "" }, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
   const messages = [
     { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } },
     { jsonrpc: "2.0", method: "notifications/initialized" },
