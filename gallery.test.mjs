@@ -62,6 +62,21 @@ test("authenticated upload publishes nested assets and rejects unsafe paths", as
   expect((await fetch(endpoint, { method: "POST", headers, body: form })).status).toBe(400);
 });
 
+test("review HTTP route persists verdicts and rejects foreign-origin writes", async () => {
+  const root = join(home, ".omo/evidence/gallery-public/alpha-review-20260928");
+  const hash = "a".repeat(64);
+  await writeFile(join(root, "manifest.json"), JSON.stringify([{ sha256: hash, name: "test candidate" }]));
+  const url = `http://127.0.0.1:${port}/api/reviews?slug=alpha-review-20260928`;
+  const response = await fetch(url, { method: "POST", headers: { Origin: `http://127.0.0.1:${port}`, "Content-Type": "application/json" }, body: JSON.stringify({ sha256: hash, verdict: "fail", note: "test note" }) });
+  expect(response.status).toBe(200);
+  expect((await response.json()).saved).toBe(true);
+  const reread = await fetch(url);
+  expect(reread.headers.get("cache-control")).toBe("no-store");
+  expect((await reread.json()).decisions[hash].note).toBe("test note");
+  expect(JSON.parse(await readFile(join(home, ".omo/evidence/gallery-public/.reviews/alpha-review-20260928", `${hash}.json`), "utf8")).verdict).toBe("fail");
+  expect((await fetch(url, { method: "POST", headers: { Origin: "https://foreign.invalid" }, body: "{}" })).status).toBe(403);
+});
+
 test("public access is explicit and revocation covers pages and nested assets", async () => {
   const form = new FormData();
   form.set("metadata", JSON.stringify({ slug: "public-review", title: "Public review", repository: "https://github.com/example/public", visibility: "public" }));
