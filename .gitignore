@@ -7,3 +7,4 @@ local-previews.json
 evidence-client.json
 .env
 .env.*
+node_modules/

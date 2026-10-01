@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, resolve, relative, isAbsolute } from "node:path";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { githubRepository } from "./repository.mjs";
+import { generateDocumentViewer } from "./ggui.mjs";
 
 export const evidenceRoot = resolve(process.env.EVIDENCE_ROOT || resolve(homedir(), ".omo/evidence/gallery-public"));
 export async function reviewResponse(request, root, publicOrigin = process.env.REVIEW_ORIGIN) {
@@ -117,8 +118,17 @@ export async function uploadEvidence(request, existingSlug) {
       await mkdir(dirname(destination), { recursive: true });
       await writeFile(destination, Buffer.from(await file.arrayBuffer()), { flag: "wx" });
     }
+    let viewer;
+    try {
+      viewer = await generateDocumentViewer(files, title.trim());
+      if (viewer) await writeFile(resolve(staging, "index.html"), viewer.html, { flag: "wx" });
+    } catch (error) {
+      console.error("Document viewer generation failed", error);
+      return Response.json({ error: "Document viewer generation failed; evidence was not published" }, { status: 502 });
+    }
     const timestamp = new Date().toISOString();
     const record = { title: title.trim(), repository: canonicalRepository, visibility,
+      ...(viewer ? { documentViewer: { provider: "ggui", sessionId: viewer.sessionId, files: viewer.documents } } : {}),
       date: timestamp.slice(0, 10), createdAt: timestamp, updatedAt: timestamp, uploadedAt: timestamp,
       tags: [...labels.map(value => ({ type: "label", value: value.trim() })), ...categories.map(value => ({ type: "category", value: value.trim() }))] };
     await writeFile(resolve(staging, ".gallery.json"), JSON.stringify(record, null, 2) + "\n");

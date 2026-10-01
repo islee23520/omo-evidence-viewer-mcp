@@ -1,0 +1,12 @@
+{
+  "name": "omo-evidence-viewer-mcp",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "bun test", "build": "bun build server.mjs mcp.mjs --target bun --outdir /tmp/evidence-gallery-build" },
+  "dependencies": {
+    "@ggui-ai/design": "0.20.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "xlsx": "0.18.5"
+  }
+}
