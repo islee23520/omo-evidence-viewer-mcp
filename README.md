@@ -7,6 +7,7 @@ A Bun gallery for reviewed, non-sensitive visual evidence. Keep private evidence
 Install Bun 1.4+ and run from this checkout:
 
 ```sh
+bun install --frozen-lockfile
 export EVIDENCE_ROOT=/data/gallery-public
 export HOST=127.0.0.1
 export PORT=17678
@@ -19,12 +20,14 @@ For an optional macOS login service, copy `com.example.omo-evidence-gallery.plis
 
 ## Persistent Docker server
 
-Place a Dockerfile in a deployment workspace containing copies of `server.mjs`, `storage.mjs`, and `repository.mjs`, or use this checkout as the build context:
+The included `Dockerfile` installs the locked dependencies and runs all tests before creating the runtime image. Use this checkout as its build context (`docker build -t evidence-gallery .`). A minimal custom deployment Dockerfile can use:
 
 ```dockerfile
 FROM oven/bun:1.4
 WORKDIR /app
-COPY server.mjs storage.mjs repository.mjs ./
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+COPY server.mjs storage.mjs repository.mjs ggui.mjs ggui-client.jsx document-data.mjs ./
 ENV HOST=0.0.0.0 PORT=17678 EVIDENCE_ROOT=/data/gallery-public
 EXPOSE 17678
 CMD ["bun", "server.mjs"]
@@ -61,6 +64,60 @@ networks:
 Start with `docker compose up -d --build`. Keep the origin on a private network, with no published host port. Connect a reverse proxy or Cloudflare Tunnel container to that network and point it at `http://gallery:17678`. If the tunnel runs on the host instead, explicitly bind the origin to loopback rather than publishing it to all interfaces. Mount or back up the persistent volume as needed; rebuilding the image must not remove evidence.
 
 Set `UPLOAD_TOKEN` to a random secret to enable uploads. Without it, the upload endpoint returns 503. `RETENTION_DAYS` defaults to 30 and `CLEANUP_INTERVAL_HOURS` to 24; both must be positive. Cleanup runs on startup and periodically, removing only folders with expired server-generated `uploadedAt` metadata. Manually copied folders aren't subject to upload retention. `bun storage.mjs` runs cleanup once when the storage module is available.
+
+## GGUI document viewers
+
+### Prepare GGUI
+
+Run a separate GGUI MCP service with its generation provider configured. The integration was verified against GGUI 0.20.0 and requires `ggui_handshake`, `ggui_render`, and compiled component code in the render result's `_meta["ai.ggui/render"].codeB64`. A healthy MCP endpoint alone does not prove that a generation provider is available. Obtain a paired bearer token using that service's pairing flow; an admin-console token is not a substitute for a paired MCP bearer.
+
+Keep the GGUI generation-provider credentials on the GGUI service. The gallery needs only the MCP URL and paired bearer. Store them in a private environment file or secret manager, never in a browser script or a tracked file.
+
+### Configure the gallery
+
+Install runtime dependencies with `bun install --frozen-lockfile`. Set these variables on the **gallery server**, not just on the publishing client:
+
+| Variable | Value |
+| --- | --- |
+| `GGUI_MCP_URL` | Reachable Streamable HTTP endpoint, including `/mcp` |
+| `GGUI_MCP_TOKEN` | Paired GGUI MCP bearer token |
+| `GGUI_TIMEOUT_MS` | Positive timeout in milliseconds; default `180000` |
+
+For a native process, a loopback service can use `GGUI_MCP_URL=http://127.0.0.1:6781/mcp`. For a remote service, use an authenticated private endpoint such as `https://ggui.example.com/mcp`. Restart the gallery process after changing its environment.
+
+For the Docker Compose example above, add:
+
+```yaml
+services:
+  gallery:
+    environment:
+      GGUI_MCP_URL: ${GGUI_MCP_URL:?set the GGUI MCP endpoint}
+      GGUI_MCP_TOKEN: ${GGUI_MCP_TOKEN:?set a paired MCP bearer}
+      GGUI_TIMEOUT_MS: ${GGUI_TIMEOUT_MS:-180000}
+```
+
+In a container, `127.0.0.1` refers to that container. If GGUI shares its Docker network, use its service name, for example `http://ggui:6781/mcp`. If GGUI runs on a Docker Desktop host (Windows or macOS), `http://host.docker.internal:6781/mcp` can be used when that host listener is reachable from containers. On Linux, configure the host gateway or use a shared network. A host loopback-only listener may require a private proxy or a different bind address. Check reachability from the gallery container rather than from the host shell. Recreate the gallery service with `docker compose up -d --build` to apply the environment.
+
+When an upload contains `.md`, `.markdown`, `.pdf`, `.csv`, or `.xlsx` files and no root `index.html`, the server calls GGUI handshake/render tools and bundles the returned compiled React viewer with its runtime into a self-contained `index.html`. Markdown is sanitized; CSV preserves quoted and multiline cells; XLSX retains worksheets and displayed cell values; PDFs use the original file for browser preview. Originals remain byte-identical, and nested document paths stay relative. The entry's directory URL opens the generated viewer. Explicitly authored `index.html` files are preserved. Without `GGUI_MCP_URL`, uploads retain the existing file-list behavior.
+
+Generation or compilation failure returns HTTP 502 and removes the staged upload rather than publishing an incomplete viewer. Public/private visibility applies to the generated page and originals together. Existing entries are not regenerated by this configuration. The remote `register_evidence` publisher uses this upload path automatically; a local-only registration does not invoke the remote server.
+
+Server images must include `ggui.mjs`, `ggui-client.jsx`, `document-data.mjs`, `package.json`, `bun.lock`, and installed runtime dependencies alongside the existing server modules. Run `bun test` and `bun run build` before deploying.
+
+### Verify an upload
+
+Upload a reviewed document without a root `index.html`:
+
+```sh
+curl --fail-with-body https://gallery.example.com/api/evidence \
+  -H "Authorization: Bearer $UPLOAD_TOKEN" \
+  -F 'metadata={"slug":"document-review","title":"Document review","repository":"https://github.com/example/project","labels":[],"categories":["documents"],"visibility":"private"}' \
+  -F 'files=@notes.md;filename=notes.md'
+```
+
+Add your proxy's service-authentication headers if required. Success returns HTTP 201 with `documentViewer.provider` set to `ggui`, the processed filenames, and a relative `url`. Open that URL through the gallery's viewer authentication and verify document tabs, full content, spreadsheet sheet selection/search, and the PDF preview as applicable. The original file URL must still return identical bytes. The generated HTML is self-contained except for original assets such as the PDF; viewing it does not require a GGUI bearer or a live GGUI connection.
+
+If `documentViewer` is absent, check that the gallery process has `GGUI_MCP_URL`, the input extension is supported, and no root `index.html` was supplied. For HTTP 502, inspect gallery logs for MCP authentication, reachability, generation, timeout, or compilation failures; the upload is not published. Do not change to unauthenticated GGUI mode to fix an invalid bearer. Increasing a timeout does not fix missing provider credentials or an incompatible GGUI tool contract.
 
 ## Cloudflare Tunnel and Access
 

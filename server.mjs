@@ -29,6 +29,9 @@ const types = {
   ".pdf": "application/pdf",
   ".txt": "text/plain; charset=utf-8",
   ".md": "text/plain; charset=utf-8",
+  ".markdown": "text/plain; charset=utf-8",
+  ".csv": "text/csv; charset=utf-8",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 };
 
 function escapeHtml(value) {
@@ -130,6 +133,10 @@ async function evidencePage(parts, raw = false) {
     if (inside.startsWith("..") || isAbsolute(inside)) return new Response("Not found", { status: 404 });
     if ((await stat(real)).isFile()) return sendFile(real, raw);
     const entries = await readdir(real, { withFileTypes: true });
+    if (entries.some(entry => entry.name === "index.html" && entry.isFile())) {
+      const metadata = Bun.file(resolve(real, ".gallery.json"));
+      if (await metadata.exists() && (await metadata.json()).documentViewer?.provider === "ggui") return sendFile(resolve(real, "index.html"), raw);
+    }
     const visible = entries.filter(x => !x.name.startsWith(".") && (x.isDirectory() || x.isFile())).sort((a, b) => a.name.localeCompare(b.name, "en", { numeric: true }));
     const media = visible.filter(x => x.isFile() && (imageTypes.has(extname(x.name).toLowerCase()) || videoTypes.has(extname(x.name).toLowerCase()) || extname(x.name).toLowerCase() === ".pdf")).map(x => ({ name: x.name, href: encodeURIComponent(x.name), kind: imageTypes.has(extname(x.name).toLowerCase()) ? "image" : videoTypes.has(extname(x.name).toLowerCase()) ? "video" : "pdf" }));
     const links = visible.map(x => `<li><a href="${encodeURIComponent(x.name)}${x.isDirectory() ? "/" : ""}">${escapeHtml(x.name)}${x.isDirectory() ? "/" : ""}</a></li>`).join("");

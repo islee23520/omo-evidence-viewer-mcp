@@ -1,0 +1,9 @@
+.git
+.omo
+node_modules
+local-previews.json
+evidence-client.json
+.env
+.env.*
+*.log
+*.plist
