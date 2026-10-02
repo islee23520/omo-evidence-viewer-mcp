@@ -134,8 +134,7 @@ async function evidencePage(parts, raw = false) {
     if ((await stat(real)).isFile()) return sendFile(real, raw);
     const entries = await readdir(real, { withFileTypes: true });
     if (entries.some(entry => entry.name === "index.html" && entry.isFile())) {
-      const metadata = Bun.file(resolve(real, ".gallery.json"));
-      if (await metadata.exists() && (await metadata.json()).documentViewer?.provider === "ggui") return sendFile(resolve(real, "index.html"), raw);
+      return sendFile(resolve(real, "index.html"), raw);
     }
     const visible = entries.filter(x => !x.name.startsWith(".") && (x.isDirectory() || x.isFile())).sort((a, b) => a.name.localeCompare(b.name, "en", { numeric: true }));
     const media = visible.filter(x => x.isFile() && (imageTypes.has(extname(x.name).toLowerCase()) || videoTypes.has(extname(x.name).toLowerCase()) || extname(x.name).toLowerCase() === ".pdf")).map(x => ({ name: x.name, href: encodeURIComponent(x.name), kind: imageTypes.has(extname(x.name).toLowerCase()) ? "image" : videoTypes.has(extname(x.name).toLowerCase()) ? "video" : "pdf" }));

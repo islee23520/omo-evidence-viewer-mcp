@@ -10,6 +10,7 @@ let port;
 beforeAll(async () => {
   home = await mkdtemp(join(tmpdir(), "gallery-test-"));
   const root = join(home, ".omo/evidence/gallery-public");
+  await mkdir(join(root, "media-only"), { recursive: true });
   await mkdir(join(root, "alpha-review-20260928"), { recursive: true });
   await mkdir(join(root, "alpha-review-20260927"));
   await mkdir(join(root, "beta-review-20260926"));
@@ -22,6 +23,9 @@ beforeAll(async () => {
   await writeFile(join(root, "alpha-review-20260928/02-clip.mp4"), "clip");
   await writeFile(join(root, "alpha-review-20260928/03-notes.pdf"), "pdf");
   await writeFile(join(root, "alpha-review-20260928/04-last.webp"), "last");
+  for (const name of ["01-first.png", "02-clip.mp4", "03-notes.pdf", "04-last.webp"]) {
+    await writeFile(join(root, "media-only", name), name);
+  }
   server = Bun.spawn(["bun", "server.mjs"], { cwd: import.meta.dir, env: { ...process.env, HOME: home, EVIDENCE_ROOT: root, UPLOAD_TOKEN: "gallery-test-token", HOST: "127.0.0.1", PORT: "0" }, stdout: "pipe", stderr: "pipe" });
   const reader = server.stdout.getReader();
   const { value } = await reader.read();
@@ -87,6 +91,10 @@ test("public access is explicit and revocation covers pages and nested assets", 
   const record = await response.json();
   expect(record.url).toStartWith("/public/");
   const base = `http://127.0.0.1:${port}${record.url}`;
+  const entry = await fetch(base);
+  expect(entry.status).toBe(200);
+  expect(await entry.text()).toContain('<img src="assets/proof.svg">');
+  expect(entry.headers.get("cache-control")).toBe("no-store");
   expect((await fetch(base + "index.html")).status).toBe(200);
   expect((await fetch(base + "assets/proof.svg")).status).toBe(200);
   await symlink(join(home, ".omo/evidence/gallery-public/alpha-review-20260928/index.html"), join(home, ".omo/evidence/gallery-public", record.slug, "private-link.html"));
@@ -96,6 +104,7 @@ test("public access is explicit and revocation covers pages and nested assets", 
   expect((await fetch(visibilityUrl, { method: "PATCH", body: JSON.stringify({ visibility: "private" }) })).status).toBe(401);
   expect((await fetch(visibilityUrl, { method: "PATCH", headers: { Authorization: "Bearer gallery-test-token", "Content-Type": "application/json" }, body: JSON.stringify({ visibility: "private" }) })).status).toBe(200);
   expect((await fetch(base + "index.html")).status).toBe(404);
+  expect((await fetch(base)).status).toBe(404);
   expect((await fetch(base + "assets/proof.svg")).status).toBe(404);
   expect((await fetch(`http://127.0.0.1:${port}/public/alpha-review-20260928/index.html`)).status).toBe(404);
 });
@@ -136,6 +145,7 @@ test("remote MCP publication verifies assets and returns an absolute remote URL"
   const published = responses[1].result.structuredContent;
   expect(published.url).toStartWith(`http://127.0.0.1:${port}/evidence/`);
   expect(published.verifiedFiles).toBe(1);
+  expect(await (await fetch(published.url + "?raw=1")).text()).toBe("<h1>Remote proof</h1>");
   expect(await (await fetch(published.url + "index.html?raw=1")).text()).toBe("<h1>Remote proof</h1>");
   expect(await (await fetch(published.url + "index.html")).text()).toContain('data-gallery-home');
 });
@@ -151,8 +161,17 @@ test("groups evidence by repository while links remain live", async () => {
   expect((await fetch(`http://127.0.0.1:${port}/evidence/alpha-review-20260928/index.html`)).status).toBe(200);
 });
 
-test("evidence folder includes ordered image, video and PDF pages without replacing file links", async () => {
+test("evidence directory serves authored index pages without viewer metadata", async () => {
   const url = `http://127.0.0.1:${port}/evidence/alpha-review-20260928/`;
+  const response = await fetch(url);
+  expect(response.status).toBe(200);
+  expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
+  expect(await response.text()).toBe(await (await fetch(url + "index.html")).text());
+  expect(await (await fetch(url + "?raw=1")).text()).toBe("<h1>Alpha review</h1>");
+});
+
+test("evidence folder without index includes ordered image, video and PDF pages and file links", async () => {
+  const url = `http://127.0.0.1:${port}/evidence/media-only/`;
   const page = await (await fetch(url)).text();
   const items = JSON.parse(/const items=(\[.*?\]);const media=/.exec(page)[1]);
   expect(items).toEqual([
@@ -161,7 +180,7 @@ test("evidence folder includes ordered image, video and PDF pages without replac
     { name: "03-notes.pdf", href: "03-notes.pdf", kind: "pdf" },
     { name: "04-last.webp", href: "04-last.webp", kind: "image" },
   ]);
-  expect(page).toContain('<a href="index.html">index.html</a>');
+  expect(page).toContain('<a href="01-first.png">01-first.png</a>');
   const video = await fetch(`${url}02-clip.mp4`);
   expect(video.headers.get("content-type")).toBe("video/mp4");
 });
