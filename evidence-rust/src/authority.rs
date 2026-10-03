@@ -1,7 +1,7 @@
 //! Fixed private service authorization protocol. No caller identity header is trusted.
 use crate::{Error, Result, now};
 use axum::http::{HeaderMap, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{collections::HashSet, time::Duration};
 use url::Url;
@@ -28,6 +28,52 @@ pub struct Principal {
     pub lane: String,
     pub effective_scopes: Vec<String>,
     pub scopes: Option<Vec<String>>,
+    #[serde(deserialize_with = "nullable_author")]
+    pub author_binding: Option<AuthorBinding>,
+    pub machine_id: Option<String>,
+    pub key_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthorBinding {
+    pub github_user_id: i64,
+    pub github_handle: String,
+    pub binding_version: i64,
+}
+fn nullable_author<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<AuthorBinding>, D::Error> {
+    let author = Option::<AuthorBinding>::deserialize(deserializer)?;
+    if author.as_ref().is_some_and(|a| {
+        a.github_user_id <= 0
+            || a.binding_version <= 0
+            || a.github_handle.is_empty()
+            || a.github_handle.len() > 39
+            || !a
+                .github_handle
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }) {
+        return Err(serde::de::Error::custom("invalid verified author binding"));
+    }
+    Ok(author)
+}
+impl Principal {
+    pub fn author(&self) -> Result<&AuthorBinding> {
+        self.author_binding.as_ref().ok_or(Error::AuthorRequired)
+    }
+    pub fn same_submission(&self, current: &Self) -> Result<()> {
+        if self.user.id != current.user.id
+            || self.lane != current.lane
+            || self.machine_id != current.machine_id
+            || self.key_id != current.key_id
+            || self.author()? != current.author()?
+        {
+            return Err(Error::Conflict);
+        }
+        Ok(())
+    }
 }
 
 impl Authority {
@@ -133,6 +179,8 @@ impl Authority {
             })
             || (principal.lane == "machine"
                 && (principal.user.is_admin
+                    || principal.machine_id.as_ref().is_none_or(String::is_empty)
+                    || principal.key_id.as_ref().is_none_or(String::is_empty)
                     || principal.scopes.as_ref().is_none_or(|issued| {
                         principal.effective_scopes.iter().any(|s| {
                             !issued.contains(s)
