@@ -48,7 +48,7 @@ try {
   const contentRoleURL=new URL(ownerURL);contentRoleURL.username=runtime;const contentURL=contentRoleURL.href;secrets.push(contentURL);
   const migrationURL=new URL(ownerURL);migrationURL.username=owner;const migrationOwnerURL=migrationURL.href;secrets.push(migrationOwnerURL);
   await writeFile(join(temporary,'owner-db'),migrationOwnerURL,{mode:0o600,flag:'wx'});
-  await command('cargo',['build','--locked','--manifest-path','evidence-rust/Cargo.toml']);
+  await command('cargo',['build','--locked','--manifest-path','evidence-rust/Cargo.toml','--all-targets']);
   await command(join(product,'evidence-rust/target/debug/omo-evidence-storage'),['migrate'],{EVIDENCE_DATABASE_URL_FILE:join(temporary,'owner-db')});
   const roleDB=new pg.Pool({connectionString:ownerURL});
   await roleDB.query(`REVOKE CONNECT ON DATABASE ${content} FROM PUBLIC; GRANT CONNECT ON DATABASE ${content} TO ${runtime}; REVOKE CREATE ON SCHEMA public FROM PUBLIC; GRANT USAGE ON SCHEMA evidence TO ${runtime}; GRANT SELECT ON ALL TABLES IN SCHEMA evidence TO ${runtime}; GRANT INSERT,UPDATE ON evidence.evidence_entry TO ${runtime}; GRANT INSERT ON evidence.evidence_revision,evidence.evidence_asset,evidence.evidence_audit TO ${runtime}`);await roleDB.end();
@@ -61,15 +61,26 @@ try {
   secrets.push(authority.machineKey,authority.evidenceMachineKey);
   authorityDB=new pg.Pool({connectionString:authorityURL});
   await authorityDB.query(`UPDATE management.service_grant SET browser_scopes='["evidence:read","evidence:upload","evidence:publish","evidence:review"]' WHERE service_id='evidence'`);
+  // Legacy baseline grant fixtures use actual current identities; no author binding is seeded.
+  for(const role of ['administrator','caseAdmin']) {
+    const response=await fetch(identity.privateOrigin+'/internal/v1/identity/resolve',{method:'POST',headers:{authorization:'Bearer '+identity.credential,'content-type':'application/json'},body:JSON.stringify({cookie:identity[role].cookie}),signal:AbortSignal.timeout(10000)});
+    assert.equal(response.status,200);const current=await response.json();
+    await authorityDB.query('INSERT INTO management.grant_user(user_id,subject) VALUES($1,$2) ON CONFLICT(user_id) DO NOTHING',[current.userId,current.googleSubject]);
+    await authorityDB.query(`INSERT INTO management.service_grant(user_id,service_id,browser_scopes,machine_scopes,revoked,version) VALUES($1,'evidence','["evidence:read","evidence:upload","evidence:publish","evidence:review"]','[]',false,1)`,[current.userId]);
+  }
+  async function handoff(role) {
   const adapter=createCentralAuthGateway({service:'evidence',privateAuthOrigin:authority.privateOrigin,serviceCredential:credentials.evidence,evidenceGatewaySecretFile:join(temporary,'gateway'),evidenceUploadToken:randomBytes(32).toString('base64url')});
   const origin='https://evidence.linalab.io';const login=await adapter.handle(new Request(origin+'/_linalab/auth/login'));assert.equal(login.status,303);
   const transaction=new URL(login.headers.get('location')).searchParams.get('request');const nonce=login.headers.get('set-cookie').split(';')[0];
-  const form=await (await fetch(authority.publicOrigin+'/continue?request='+transaction,{headers:{cookie:identity.valid.cookie},signal:AbortSignal.timeout(10000)})).text();
+  const form=await (await fetch(authority.publicOrigin+'/continue?request='+transaction,{headers:{cookie:identity[role].cookie},signal:AbortSignal.timeout(10000)})).text();
   const field=(html,name)=>html.match(new RegExp(`name="${name}" value="([^"]+)"`))?.[1];
-  const approved=await fetch(authority.publicOrigin+'/continue',{method:'POST',headers:{cookie:identity.valid.cookie,origin:'https://auth.linalab.io'},body:new URLSearchParams({request:transaction,csrf:field(form,'csrf')}),signal:AbortSignal.timeout(10000)});assert.equal(approved.status,200);
+  const approved=await fetch(authority.publicOrigin+'/continue',{method:'POST',headers:{cookie:identity[role].cookie,origin:'https://auth.linalab.io'},body:new URLSearchParams({request:transaction,csrf:field(form,'csrf')}),signal:AbortSignal.timeout(10000)});assert.equal(approved.status,200);
   const callback=await adapter.handle(new Request(origin+'/_linalab/auth/callback',{method:'POST',headers:{cookie:nonce,origin:'https://auth.linalab.io','content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({transaction,code:field(await approved.text(),'code')})}));assert.equal(callback.status,303);
-  const browser=callback.headers.getSetCookie().find(v=>v.startsWith('__Host-linalab-evidence=')).split(';')[0].split('=')[1];secrets.push(browser);
-  const fixture=join(temporary,'storage.json');await writeFile(fixture,JSON.stringify({databaseURL:contentURL,ownerDatabaseURL:migrationOwnerURL,restoreDatabaseURL:restoreURL,machineKey:authority.evidenceMachineKey,authorityOrigin:authority.privateOrigin,serviceSecret:credentials.evidence,browserHandle:browser,ownerId:authority.ownerId,authorityDatabaseURL:authorityURL}),{mode:0o600,flag:'wx'});
+  const handle=callback.headers.getSetCookie().find(v=>v.startsWith('__Host-linalab-evidence=')).split(';')[0].split('=')[1];secrets.push(handle);return handle;
+  }
+  const browser=await handoff('valid'),administratorHandle=await handoff('administrator'),nonownerHandle=await handoff('caseAdmin');
+  const fixture=join(temporary,'storage.json');await writeFile(fixture,JSON.stringify({databaseURL:contentURL,ownerDatabaseURL:migrationOwnerURL,restoreDatabaseURL:restoreURL,machineKey:authority.evidenceMachineKey,authorityOrigin:authority.privateOrigin,serviceSecret:credentials.evidence,browserHandle:browser,administratorHandle,nonownerHandle,ownerId:authority.ownerId,authorityDatabaseURL:authorityURL}),{mode:0o600,flag:'wx'});
+  assert.ok(process.env.EVIDENCE_DISK_FULL_QA_MOUNT,'An exclusively owned bounded filesystem is required for real ENOSPC acceptance');
   await command('cargo',['test','--locked','--manifest-path','evidence-rust/Cargo.toml','--all-targets','--all-features'],{EVIDENCE_STORAGE_QA_FIXTURE:fixture,EVIDENCE_STORAGE_QA_ARCHIVE:archive});
   await command('cargo',['test','--locked','--manifest-path','evidence-rust/Cargo.toml','--doc']);
   contentDB=new pg.Pool({connectionString:contentURL});
@@ -85,8 +96,17 @@ finally {
   if(contentDB)await contentDB.end();if(authorityDB)await authorityDB.end();
   for(const database of databases.toReversed())await admin.query(`DROP DATABASE ${database}`);
   for(const role of roles.toReversed())await admin.query(`DROP ROLE ${role}`);
-  const after=await catalog();assert.deepEqual(after,before);
-  await writeFile(join(archive,'cleanup.json'),JSON.stringify({before,after,ownedDatabases:databases,ownedRoles:roles,allOwnedAbsent:true},null,2),{mode:0o600});
+  const after=await catalog();
+  // Concurrent, separately owned QA may appear/disappear; preserve every row that
+  // existed at this run's start and never clean a foreign name.
+  const owned=new Set(databases);
+  const remainingOriginal=after.filter(row=>before.some(prior=>prior.oid===row.oid));
+  const stableBefore=before.filter(row=>after.some(current=>current.oid===row.oid));
+  assert.deepEqual(remainingOriginal,stableBefore);
+  assert.equal(after.some(row=>owned.has(row.datname)),false);
+  const originalSeven=['template1','template0','postgres','auth_qa','portal_58914_1790961734460669000','portal_59699_1790961746544346000','publish_qa_4d91b5f441ee300770c71df5'];
+  for(const name of originalSeven)assert.deepEqual(after.find(row=>row.datname===name),before.find(row=>row.datname===name));
+  await writeFile(join(archive,'cleanup.json'),JSON.stringify({before,after,ownedDatabases:databases,ownedRoles:roles,allOwnedAbsent:true,concurrentForeignRowsPreserved:true},null,2),{mode:0o600});
   await writeFile(join(archive,'commands.json'),JSON.stringify(commands,null,2),{mode:0o600});
   await admin.end();await rm(temporary,{recursive:true,force:true});
 }

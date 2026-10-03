@@ -36,6 +36,14 @@ directory is durable. The append-only ownership ledger retains orphan and uncert
 commit states. There is no claim of a cross-filesystem transaction and no automatic
 GC, retention deletion or cleanup of another process's stage.
 
+Each stage retains an exclusive lease through immutable preparation and pointer
+commit. The fsynced ledger event is emitted only after durability, allowing an
+operator to observe a precise publication boundary. Cancellation and streamed
+disconnect clean only that live stage. `recover-orphans` reconciles existing
+owned UUIDs, live leases and every retained DB revision without deleting files;
+an inactive unreferenced revision remains an explicit orphan. Recovery never
+turns lease expiry into authorization to replay publication or remove assets.
+
 Raw and download bytes are checked against their actual asset hashes before
 serving. Access and visibility are evaluated before ETag, conditional and Range
 responses. Private responses use `private, no-store`; public responses use
@@ -77,3 +85,10 @@ dropping its own resources. A ready `gateway_qa` source binary and the authority
 existing dependencies are prerequisites. The runner is intentionally explicit
 about its legacy session fixture: it does not prove the current Access PIN author
 integration. The operator must close the separately owned forward afterward.
+`EVIDENCE_DISK_FULL_QA_MOUNT` must designate an exclusively owned bounded mounted
+filesystem (the accepted Mac fixture is a new 64 MiB RAM disk). The disk test
+fills only that filesystem to actual ENOSPC, exercises a failed stage write and
+removes its own filler. It never fills the host volume. The operator detaches the
+owned fixture after the crate-wide run. QA fixture grant preparation uses actual
+source-resolved legacy principals; it never seeds a GitHub binding or claims
+current PIN/author-ready acceptance.

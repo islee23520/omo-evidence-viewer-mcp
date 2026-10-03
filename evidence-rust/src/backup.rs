@@ -74,11 +74,11 @@ pub async fn create(storage: &Storage, destination: &Path) -> Result<String> {
                 &storage.files.read(digest, &asset.path)?,
             )?;
         }
-        let (id, restored, _) = backup_files.seal(stage)?;
-        if restored != *digest {
+        let prepared = backup_files.seal(stage)?;
+        if prepared.digest != *digest {
             return Err(Error::Unavailable);
         }
-        backup_files.record(id, "backup", Some(digest))?;
+        backup_files.record(prepared.id, "backup", Some(digest))?;
     }
     let backup = Backup {
         schema_version: 1,
@@ -158,11 +158,13 @@ pub async fn restore(storage: &Storage, source: &Path) -> Result<()> {
         for asset in &manifest.assets {
             stage.add(asset.path.clone(), &source_files.read(digest, &asset.path)?)?;
         }
-        let (id, restored, _) = storage.files.seal(stage)?;
-        if restored != *digest {
+        let prepared = storage.files.seal(stage)?;
+        if prepared.digest != *digest {
             return Err(Error::Invalid);
         }
-        storage.files.record(id, "restore_durable", Some(digest))?;
+        storage
+            .files
+            .record(prepared.id, "restore_durable", Some(digest))?;
     }
     for table in TABLES {
         for original in backup.tables.get(table).ok_or(Error::Invalid)? {

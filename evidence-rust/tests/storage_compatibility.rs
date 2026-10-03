@@ -35,6 +35,8 @@ struct Fixture {
     #[serde(rename = "restoreDatabaseURL")]
     restore_database_url: String,
     machine_key: String,
+    administrator_handle: String,
+    nonowner_handle: String,
 }
 fn protected(path: &Path, bytes: &[u8]) -> Result {
     let mut file = fs::OpenOptions::new()
@@ -135,6 +137,56 @@ async fn storage_compatibility() -> Result {
     assert_eq!(entry.slug, "legacy-synthetic-20261003");
     assert_eq!(entry.provenance.get("author"), Some(&json!("unknown")));
     let before = entry.revision.clone();
+    let boundary = Path::new(env!("CARGO_BIN_EXE_omo-evidence-storage"))
+        .parent()
+        .ok_or("binary directory")?
+        .join("examples/publication_boundary");
+    let mut crash = tokio::process::Command::new(boundary)
+        .env("EVIDENCE_CONTENT_ROOT", &root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut crash_lines = BufReader::new(crash.stdout.take().ok_or("crash stdout")?).lines();
+    let prepared_line = tokio::time::timeout(Duration::from_secs(10), crash_lines.next_line())
+        .await??
+        .ok_or("prepared event")?;
+    let prepared: Value = serde_json::from_str(&prepared_line)?;
+    assert_eq!(prepared.get("event"), Some(&json!("publication_prepared")));
+    let crash_id = prepared
+        .get("stage")
+        .and_then(Value::as_str)
+        .ok_or("stage id")?;
+    let crash_digest = prepared
+        .get("digest")
+        .and_then(Value::as_str)
+        .ok_or("stage digest")?;
+    let referenced = std::collections::BTreeSet::from([entry.digest.clone()]);
+    let active = storage.files.recover(&referenced)?;
+    assert!(
+        active
+            .iter()
+            .any(|s| s.stage.to_string() == crash_id && s.active && !s.referenced)
+    );
+    // The exact durable publication event precedes this hard kill of the owned process.
+    crash.kill().await?;
+    let status = tokio::time::timeout(Duration::from_secs(10), crash.wait()).await??;
+    assert!(!status.success());
+    let recovered = storage.files.recover(&referenced)?;
+    assert!(recovered.iter().any(|s| s.stage.to_string() == crash_id
+        && !s.active
+        && !s.referenced
+        && s.state == "immutable"));
+    assert!(root.join("revisions").join(crash_digest).is_dir());
+    assert_eq!(storage.get(&entry.slug).await?.revision, before);
+    let archive = std::env::var("EVIDENCE_STORAGE_QA_ARCHIVE")?;
+    protected(
+        &Path::new(&archive).join("publication-crash.json"),
+        &serde_json::to_vec(
+            &json!({"prepared":prepared,"recovered":recovered,"lastHealthyRevision":before,"noDeletion":true}),
+        )?,
+    )?;
     let mut duplicate = storage.files.stage()?;
     duplicate.add("case.txt".into(), b"first")?;
     assert!(duplicate.add("CASE.TXT".into(), b"second").is_err());
@@ -185,6 +237,18 @@ async fn storage_compatibility() -> Result {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     let mut child = command.spawn()?;
+    let mut stderr_lines = BufReader::new(child.stderr.take().ok_or("storage stderr")?).lines();
+    let (stage_events, mut stage_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let stderr_task = tokio::spawn(async move {
+        while let Some(line) = stderr_lines.next_line().await? {
+            if let Ok(value) = serde_json::from_str::<Value>(&line)
+                && value.get("event") == Some(&json!("evidence_stage"))
+            {
+                let _sent = stage_events.send(value);
+            }
+        }
+        Ok::<(), std::io::Error>(())
+    });
     let mut lines = BufReader::new(child.stdout.take().ok_or("stdout")?).lines();
     let line = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
         .await??
@@ -208,6 +272,39 @@ async fn storage_compatibility() -> Result {
     let private = format!("{origin}/evidence/{}/assets/proof.bin", entry.slug);
     let public = format!("{origin}/public/{}/assets/proof.bin", entry.slug);
     let mut http = Vec::<Value>::new();
+    use tokio::io::AsyncWriteExt;
+    let mut disconnect =
+        tokio::net::TcpStream::connect(origin.trim_start_matches("http://")).await?;
+    let metadata=json!({"slug":"disconnected","title":"Synthetic","repository":"https://github.com/example/synthetic"}).to_string();
+    let multipart_prefix = format!(
+        "--disconnect\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{metadata}\r\n--disconnect\r\nContent-Disposition: form-data; name=\"files\"; filename=\"partial.bin\"\r\n\r\npartial bytes"
+    );
+    disconnect.write_all(format!("POST /api/evidence HTTP/1.1\r\nHost: evidence.linalab.io\r\nCookie: {cookie}\r\nOrigin: https://evidence.linalab.io\r\nX-CSRF-Token: {csrf}\r\nContent-Type: multipart/form-data; boundary=disconnect\r\nContent-Length: 1048576\r\n\r\n{multipart_prefix}").as_bytes()).await?;
+    let allocated = tokio::time::timeout(Duration::from_secs(10), stage_receiver.recv())
+        .await?
+        .ok_or("allocated stage event")?;
+    assert_eq!(allocated.get("state"), Some(&json!("allocated")));
+    let disconnected_id = allocated.get("stage").ok_or("stage id")?.clone();
+    drop(disconnect);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(value) = stage_receiver.recv().await {
+            if value.get("stage") == Some(&disconnected_id)
+                && value.get("state") == Some(&json!("removed"))
+            {
+                return Ok::<(), Box<dyn std::error::Error + Send + Sync>>(());
+            }
+        }
+        Err("removed event absent".into())
+    })
+    .await??;
+    assert_eq!(fs::read_dir(root.join("staging"))?.count(), 0);
+    assert_eq!(storage.get(&entry.slug).await?.revision, before);
+    protected(
+        &Path::new(&std::env::var("EVIDENCE_STORAGE_QA_ARCHIVE")?).join("disconnect.json"),
+        &serde_json::to_vec(
+            &json!({"allocated":allocated,"removed":true,"lastHealthyRevision":before}),
+        )?,
+    )?;
     let mut foreign_stage = storage.files.stage()?;
     foreign_stage.add("proof.txt".into(), b"private synthetic proof")?;
     let foreign = storage
@@ -219,6 +316,72 @@ async fn storage_compatibility() -> Result {
             &"c".repeat(64),
         )
         .await?;
+    let review_manifest =
+        serde_json::to_vec(&json!([{"sha256":sha,"name":"Private matrix proof"}]))?;
+    let mut matrix_stage = storage.files.stage()?;
+    matrix_stage.add("proof.txt".into(), b"private matrix bytes")?;
+    matrix_stage.add("manifest.json".into(), &review_manifest)?;
+    let matrix = storage
+        .import(
+            "private-matrix",
+            Some(&fixture.owner_id),
+            json!({"title":"Private matrix title","visibility":"private"}),
+            matrix_stage,
+            &"d".repeat(64),
+        )
+        .await?;
+    let handles = [
+        ("owner", fixture.browser_handle.as_str(), 200_u16),
+        ("nonowner", fixture.nonowner_handle.as_str(), 404_u16),
+        (
+            "administrator",
+            fixture.administrator_handle.as_str(),
+            200_u16,
+        ),
+    ];
+    for (lane, handle, expected) in handles {
+        let cookie = format!("__Host-linalab-evidence={handle}");
+        let mut mac =
+            hmac::Hmac::<sha2::Sha256>::new_from_slice(fixture.service_secret.as_bytes())?;
+        mac.update(format!("csrf:evidence:{handle}").as_bytes());
+        let csrf =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+        let read = client
+            .get(format!("{origin}/evidence/{}/proof.txt", matrix.slug))
+            .header("cookie", &cookie)
+            .send_captured()
+            .await?;
+        assert_eq!(read.status().as_u16(), expected, "private read {lane}");
+        let reviews = format!("{origin}/api/reviews?slug={}", matrix.slug);
+        assert_eq!(
+            client
+                .get(&reviews)
+                .header("cookie", &cookie)
+                .send_captured()
+                .await?
+                .status()
+                .as_u16(),
+            expected,
+            "review read {lane}"
+        );
+        assert_eq!(client.post(&reviews).header("cookie",&cookie).header("origin","https://evidence.linalab.io").header("x-csrf-token",&csrf).json(&json!({"sha256":sha,"verdict":"pending","note":format!("{lane} synthetic review")})).send_captured().await?.status().as_u16(),expected,"review write {lane}");
+        let form=reqwest::multipart::Form::new().text("metadata",json!({"slug":"acl-upload","title":"Synthetic","repository":"https://github.com/example/synthetic"}).to_string()).part("files",reqwest::multipart::Part::bytes(b"synthetic".to_vec()).file_name("proof.txt"));
+        let uploaded: Value = client
+            .post(format!("{origin}/api/evidence"))
+            .header("cookie", &cookie)
+            .header("origin", "https://evidence.linalab.io")
+            .header("x-csrf-token", &csrf)
+            .multipart(form)
+            .send_captured()
+            .await?
+            .json()
+            .await?;
+        assert_eq!(
+            uploaded.get("error"),
+            Some(&json!("author_identity_required")),
+            "unlinked upload {lane}"
+        );
+    }
     let foreign_response = client
         .get(format!("{origin}/evidence/{}/proof.txt", foreign.slug))
         .header("cookie", &cookie)
@@ -527,7 +690,7 @@ async fn storage_compatibility() -> Result {
         413
     );
     // Only the deliberately retained failed seal remains; uploads removed their live stage.
-    assert_eq!(fs::read_dir(root.join("staging"))?.count(), 1);
+    assert_eq!(fs::read_dir(root.join("staging"))?.count(), 0);
     assert_eq!(storage.get(&entry.slug).await?.revision, before);
     let patch = format!("{origin}/api/evidence/{}/visibility", entry.slug);
     assert_eq!(
@@ -645,6 +808,7 @@ async fn storage_compatibility() -> Result {
             .await??
             .success()
     );
+    tokio::time::timeout(Duration::from_secs(10), stderr_task).await???;
     authority_db.close().await?;
     database.close().await?;
     owner_database.close().await?;
