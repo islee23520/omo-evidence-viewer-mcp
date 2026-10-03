@@ -126,6 +126,25 @@ async fn run() -> Result<()> {
             backup::restore(&storage, Path::new(path)).await?;
             println!("EVIDENCE_RESTORED");
         }
+        [command] if command == "recover-orphans" => {
+            use sea_orm::ConnectionTrait;
+            let rows = storage
+                .db
+                .query_all_raw(omo_evidence_storage::storage::statement(
+                    "SELECT DISTINCT digest FROM evidence.evidence_revision",
+                    vec![],
+                ))
+                .await?;
+            let mut referenced = std::collections::BTreeSet::new();
+            for row in rows {
+                referenced.insert(row.try_get::<String>("", "digest")?);
+            }
+            let recovered = storage.files.recover(&referenced)?;
+            println!(
+                "{}",
+                serde_json::json!({"recovery":recovered,"deletionPerformed":false})
+            );
+        }
         [] => {
             let secret = protected(Path::new(&variable("AUTH_EVIDENCE_SERVICE_SECRET_FILE")?))?;
             let authority = Authority::new(

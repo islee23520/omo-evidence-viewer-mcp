@@ -110,7 +110,10 @@ impl Storage {
             self.files.abort(stage)?;
             return Err(Error::Invalid);
         }
-        let (stage_id, digest, manifest) = self.files.seal(stage)?;
+        let prepared = self.files.seal(stage)?;
+        let stage_id = prepared.id;
+        let digest = prepared.digest.clone();
+        let manifest = prepared.manifest.clone();
         let provenance =
             json!({"kind":"legacy_import","author":"unknown","sourceManifestSha256":source_digest});
         let id = Uuid::new_v4();

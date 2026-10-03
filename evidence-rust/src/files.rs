@@ -35,6 +35,24 @@ pub struct Stage {
     pub assets: Vec<Asset>,
     names: BTreeSet<String>,
     pub bytes: usize,
+    owner: Files,
+    lease: Option<File>,
+    live: bool,
+}
+pub struct Prepared {
+    pub id: Uuid,
+    pub digest: String,
+    pub manifest: Manifest,
+    _lease: Option<File>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecoveredStage {
+    pub stage: Uuid,
+    pub state: String,
+    pub digest: Option<String>,
+    pub active: bool,
+    pub referenced: bool,
 }
 
 pub fn safe_path(path: &str) -> bool {
@@ -105,7 +123,7 @@ impl Files {
         if !root.is_dir() || fs::metadata(root)?.permissions().mode() & 0o077 != 0 {
             return Err(Error::Invalid);
         }
-        for name in ["staging", "revisions"] {
+        for name in ["staging", "revisions", "leases"] {
             let dir = root.join(name);
             if !dir.exists() {
                 fs::create_dir(&dir)?;
@@ -135,20 +153,34 @@ impl Files {
         let mut ledger = self.ledger.lock().map_err(|_| Error::Unavailable)?;
         rustix::fs::flock(&*ledger, rustix::fs::FlockOperation::LockExclusive)
             .map_err(|_| Error::Unavailable)?;
-        serde_json::to_writer(
-            &mut *ledger,
-            &serde_json::json!({"stage":id,"state":state,"digest":digest,"time":now()}),
-        )
-        .map_err(|_| Error::Unavailable)?;
-        ledger.write_all(b"\n")?;
-        ledger.sync_all()?;
+        let result = (|| {
+            serde_json::to_writer(
+                &mut *ledger,
+                &serde_json::json!({"stage":id,"state":state,"digest":digest,"time":now()}),
+            )
+            .map_err(|_| Error::Unavailable)?;
+            ledger.write_all(b"\n")?;
+            ledger.sync_all()?;
+            Ok::<(), Error>(())
+        })();
         rustix::fs::flock(&*ledger, rustix::fs::FlockOperation::Unlock)
             .map_err(|_| Error::Unavailable)?;
+        result?;
+        // Emitted only AFTER the ownership record is durable. Metadata only.
+        eprintln!(
+            "{}",
+            serde_json::json!({"event":"evidence_stage","stage":id,"state":state,"digest":digest})
+        );
         Ok(())
     }
     pub fn stage(&self) -> Result<Stage> {
         use std::os::unix::fs::PermissionsExt;
         let id = Uuid::new_v4();
+        let lease = exclusive(&self.root.join("leases").join(id.to_string()))?;
+        rustix::fs::flock(&lease, rustix::fs::FlockOperation::LockExclusive)
+            .map_err(|_| Error::Unavailable)?;
+        lease.sync_all()?;
+        sync_directory(&self.root.join("leases"))?;
         self.record(id, "allocated", None)?;
         let directory = self.root.join("staging").join(id.to_string());
         fs::create_dir(&directory)?;
@@ -160,17 +192,38 @@ impl Files {
             assets: Vec::new(),
             names: BTreeSet::new(),
             bytes: 0,
+            owner: self.clone(),
+            lease: Some(lease),
+            live: true,
         })
     }
-    pub fn abort(&self, stage: Stage) -> Result<()> {
-        // Only the exclusive directory created by this live Stage can be removed.
-        self.record(stage.id, "aborted", None)?;
-        no_links(&stage.directory)?;
-        fs::remove_dir_all(&stage.directory)?;
-        sync_directory(&self.root.join("staging"))?;
-        self.record(stage.id, "removed", None)
+    pub fn abort(&self, mut stage: Stage) -> Result<()> {
+        stage.live = false;
+        self.abort_owned(stage.id, &stage.directory)
     }
-    pub fn seal(&self, mut stage: Stage) -> Result<(Uuid, String, Manifest)> {
+    fn abort_owned(&self, id: Uuid, directory: &Path) -> Result<()> {
+        // Only the exclusive directory created by this live Stage can be removed.
+        self.record(id, "aborted", None)?;
+        no_links(directory)?;
+        fn writable(path: &Path) -> Result<()> {
+            use std::os::unix::fs::PermissionsExt;
+            if fs::symlink_metadata(path)?.is_dir() {
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+                for entry in fs::read_dir(path)? {
+                    let entry = entry?;
+                    if entry.file_type()?.is_dir() {
+                        writable(&entry.path())?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        writable(directory)?;
+        fs::remove_dir_all(directory)?;
+        sync_directory(&self.root.join("staging"))?;
+        self.record(id, "removed", None)
+    }
+    pub fn seal(&self, mut stage: Stage) -> Result<Prepared> {
         use std::os::unix::fs::PermissionsExt;
         // Recheck actual durable files, not a caller's hash claims or cached buffers.
         for asset in &stage.assets {
@@ -231,7 +284,65 @@ impl Files {
         sync_directory(&self.root.join("revisions"))?;
         sync_directory(&self.root.join("staging"))?;
         self.record(stage.id, "immutable", Some(&digest))?;
-        Ok((stage.id, digest, manifest))
+        stage.live = false;
+        Ok(Prepared {
+            id: stage.id,
+            digest,
+            manifest,
+            _lease: stage.lease.take(),
+        })
+    }
+    /// Reconcile owned stage records while retaining every file. No orphan GC is implied.
+    pub fn recover(&self, referenced: &BTreeSet<String>) -> Result<Vec<RecoveredStage>> {
+        let mut ledger = File::open(self.root.join("ownership.jsonl"))?;
+        rustix::fs::flock(&ledger, rustix::fs::FlockOperation::LockShared)
+            .map_err(|_| Error::Unavailable)?;
+        let mut bytes = Vec::new();
+        ledger.read_to_end(&mut bytes)?;
+        drop(ledger);
+        let mut records = std::collections::BTreeMap::new();
+        for line in bytes.split(|b| *b == b'\n').filter(|line| !line.is_empty()) {
+            let value: serde_json::Value =
+                serde_json::from_slice(line).map_err(|_| Error::Unavailable)?;
+            let id = value
+                .get("stage")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or(Error::Unavailable)?;
+            records.insert(id, value);
+        }
+        let mut recovered = Vec::new();
+        for (stage, value) in records {
+            let state = value
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(Error::Unavailable)?
+                .to_owned();
+            let digest = value
+                .get("digest")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            let lease_path = self.root.join("leases").join(stage.to_string());
+            no_links(&lease_path)?;
+            let lease = OpenOptions::new().read(true).write(true).open(lease_path)?;
+            let active = match rustix::fs::flock(
+                &lease,
+                rustix::fs::FlockOperation::NonBlockingLockExclusive,
+            ) {
+                Ok(()) => false,
+                Err(rustix::io::Errno::WOULDBLOCK) => true,
+                Err(_) => return Err(Error::Unavailable),
+            };
+            let referenced = digest.as_ref().is_some_and(|d| referenced.contains(d));
+            recovered.push(RecoveredStage {
+                stage,
+                state,
+                digest,
+                active,
+                referenced,
+            });
+        }
+        Ok(recovered)
     }
     pub fn read(&self, digest: &str, path: &str) -> Result<Vec<u8>> {
         if digest.len() != 64
@@ -294,6 +405,20 @@ impl Files {
             }
         }
         Ok(())
+    }
+}
+impl Drop for Stage {
+    fn drop(&mut self) {
+        if self.live {
+            // Cancellation/disconnect releases only this live stage's ownership.
+            // Failed cleanup remains in the ledger for explicit recovery; never delete a revision.
+            if self.owner.abort_owned(self.id, &self.directory).is_err() {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"event":"evidence_stage_cleanup_failed","stage":self.id})
+                );
+            }
+        }
     }
 }
 impl Stage {
