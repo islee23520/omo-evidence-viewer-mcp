@@ -1,7 +1,8 @@
 //! Pointer commit occurs only after immutable files are durable. No authority DDL.
 use crate::{
     Error, Result,
-    files::{Files, Manifest, Stage},
+    authority::{Authority, Principal},
+    files::{Files, Manifest, Prepared, Stage},
     now,
 };
 use sea_orm::{
@@ -34,6 +35,54 @@ pub fn statement(sql: &str, values: Vec<SqlValue>) -> Statement {
 }
 
 impl Storage {
+    pub async fn commit_upload(
+        &self,
+        slug: &str,
+        metadata: Value,
+        prepared: Prepared,
+        accepted: &Principal,
+        authority: &Authority,
+        headers: &axum::http::HeaderMap,
+    ) -> Result<Entry> {
+        let author = accepted.author()?.clone();
+        let id = Uuid::new_v4();
+        let revision = Uuid::new_v4();
+        let timestamp = now();
+        let visibility = metadata
+            .get("visibility")
+            .and_then(Value::as_str)
+            .filter(|v| matches!(*v, "private" | "public"))
+            .ok_or(Error::Invalid)?;
+        let tx = self.db.begin().await?;
+        let result=async {
+            tx.execute_raw(statement("INSERT INTO evidence.evidence_entry(id,slug,owner_user_id,visibility,version,created_at,updated_at) VALUES($1::uuid,$2,$3,$4,1,$5,$5)",vec![id.to_string().into(),slug.into(),accepted.user.id.clone().into(),visibility.into(),timestamp.into()])).await?;
+            let attribution=serde_json::json!({"kind":"verified_submission","authorBinding":author,"submittedBy":{"userId":accepted.user.id,"principalType":accepted.lane,"machineId":accepted.machine_id,"keyId":accepted.key_id}});
+            tx.execute_raw(statement("INSERT INTO evidence.evidence_revision(id,entry_id,digest,manifest,metadata,provenance,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7)",vec![revision.to_string().into(),id.to_string().into(),prepared.digest.clone().into(),serde_json::json!(prepared.manifest).into(),metadata.clone().into(),attribution.clone().into(),timestamp.into()])).await?;
+            for asset in &prepared.manifest.assets {tx.execute_raw(statement("INSERT INTO evidence.evidence_asset(revision_id,path,sha256,bytes) VALUES($1::uuid,$2,$3,$4)",vec![revision.to_string().into(),asset.path.clone().into(),asset.sha256.clone().into(),i64::try_from(asset.bytes).map_err(|_|Error::Invalid)?.into()])).await?;}
+            tx.execute_raw(statement("INSERT INTO evidence.evidence_audit(id,entry_id,revision_id,actor_user_id,action,payload,created_at) VALUES($1::uuid,$2::uuid,$3::uuid,$4,'upload.commit',$5,$6)",vec![Uuid::new_v4().to_string().into(),id.to_string().into(),revision.to_string().into(),accepted.user.id.clone().into(),serde_json::json!({"stage":prepared.id,"digest":prepared.digest,"attribution":attribution}).into(),timestamp.into()])).await?;
+            // A second independent observation immediately precedes pointer mutation.
+            // This is not a distributed authority/content transaction.
+            let current=authority.authorize(headers,"POST","/api/evidence","evidence:upload").await?;
+            accepted.same_submission(&current)?;
+            if visibility=="public"&&(current.lane!="browser"||!current.effective_scopes.iter().any(|s|s=="evidence:publish")){return Err(Error::Authority(axum::http::StatusCode::FORBIDDEN));}
+            tx.execute_raw(statement("UPDATE evidence.evidence_entry SET current_revision_id=$1::uuid WHERE id=$2::uuid AND current_revision_id IS NULL",vec![revision.to_string().into(),id.to_string().into()])).await?;
+            Ok::<(),Error>(())
+        }.await;
+        if let Err(error) = result {
+            tx.rollback().await?;
+            self.files
+                .record(prepared.id, "db_failed_orphan", Some(&prepared.digest))?;
+            return Err(error);
+        }
+        if tx.commit().await.is_err() {
+            self.files
+                .record(prepared.id, "db_commit_unknown", Some(&prepared.digest))?;
+            return Err(Error::Unavailable);
+        }
+        self.files
+            .record(prepared.id, "committed", Some(&prepared.digest))?;
+        self.get(slug).await
+    }
     pub async fn migrate(db: &DatabaseConnection) -> Result<()> {
         let tx = db.begin().await?;
         tx.execute_unprepared("SELECT pg_advisory_xact_lock(191920261003)")

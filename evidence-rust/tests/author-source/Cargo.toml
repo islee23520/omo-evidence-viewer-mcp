@@ -1,0 +1,29 @@
+[package]
+name = "evidence-author-source-qa"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+linalab-auth = { path = "../../../../../linalab-ci-wt/reliability-20261002/auth-rust" }
+omo-evidence-storage = { path = "../.." }
+async-trait = "0.1.89"
+axum = "=0.8.9"
+base64 = "0.22.1"
+hmac = "0.12.1"
+sha2 = "0.10.9"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sea-orm = { version = "=2.0.4", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "with-json", "with-time"] }
+sea-orm-migration = { version = "=2.0.4", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["json", "rustls", "multipart"] }
+time = { version = "=0.3.55", features = ["formatting"] }
+tokio = { version = "=1.53.1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "process", "io-util"] }
+url = "=2.5.8"
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

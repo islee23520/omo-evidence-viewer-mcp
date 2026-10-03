@@ -1,6 +1,9 @@
 # Required authority-owned private author contract
 
-This is a proposal, not an implemented endpoint or an accepted response field.
+This additive response contract is implemented and independently reviewed in the
+authority source at `6c5158a6e4118cf0a9cc6bb21fc5e738f0e628b0`, auth tree
+`77459922ef4d0dc2914f29e2af0b87f859a6d8ae`. It is not present in the frozen
+operating Task 11 image. Evidence consumes it only through private authorization.
 The existing private authorize request and service credential already identify the
 current account, key/session, audience, method, route and current scopes. Preserve
 that request and append an authority-owned optional `authorBinding` result only
@@ -33,8 +36,8 @@ binding denies new commits without replacing any healthy revision. Existing lega
 imports remain explicitly author-unknown; complete catalog activation is blocked
 until evidence-backed attribution is resolved by the operator.
 
-The authority owner must approve and implement this additive private response
-contract with real PostgreSQL source tests for browser and key-owner resolution,
-unlink/relink/revoke and incompatible subject denial. Evidence then adds exact
-typed parsing and listening end-to-end author-ready commit coverage against that
-source. A synthetic oracle that invents the field does not satisfy that gate.
+The authority owner source tests cover browser and key-owner resolution,
+unlink/relink/revoke and incompatible subject denial. Evidence's source-owned
+listening E2E consumes that actual implementation, with exact typed parsing,
+author-ready multipart commits and fresh pre-pointer rechecks. A synthetic oracle
+that invents the private field does not satisfy this gate.

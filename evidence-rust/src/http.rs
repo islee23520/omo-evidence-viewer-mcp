@@ -98,6 +98,9 @@ fn record(entry: &Entry) -> Value {
     if let Some(object) = record.as_object_mut() {
         object.insert("visibility".into(), json!(entry.visibility));
         object.insert("slug".into(), json!(entry.slug));
+        if let Some(author) = entry.provenance.get("authorBinding") {
+            object.insert("authorBinding".into(), author.clone());
+        }
         object.insert(
             "url".into(),
             json!(format!(
@@ -568,28 +571,62 @@ async fn upload(app: &App, headers: &HeaderMap, request: Request) -> Result<Resp
     } else {
         parsed
     };
-    let result = match parsed {
-        Err(error) => Err(error),
-        Ok(input) => {
-            if input.visibility == "public"
-                && (principal.lane != "browser"
-                    || !principal
-                        .effective_scopes
-                        .iter()
-                        .any(|s| s == "evidence:publish"))
-            {
-                Err(Error::Authority(StatusCode::FORBIDDEN))
-            } else {
-                // The deployed private protocol does not return a verified author binding.
-                // Do not invent fields, call the public PIN route, or accept an uploaded identity.
-                let current =
-                    authorized(app, headers, "POST", "/api/evidence", "evidence:upload").await;
-                current.and_then(|_| Err(Error::AuthorRequired))
-            }
+    let input = match parsed {
+        Err(error) => {
+            app.storage.files.abort(stage)?;
+            return Err(error);
         }
+        Ok(input) => input,
     };
-    app.storage.files.abort(stage)?;
-    result
+    if input.visibility == "public"
+        && (principal.lane != "browser"
+            || !principal
+                .effective_scopes
+                .iter()
+                .any(|s| s == "evidence:publish"))
+    {
+        app.storage.files.abort(stage)?;
+        return Err(Error::Authority(StatusCode::FORBIDDEN));
+    }
+    if let Err(error) = principal.author() {
+        app.storage.files.abort(stage)?;
+        return Err(error);
+    }
+    let prepared = app.storage.files.seal(stage)?;
+    let timestamp = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|_| Error::Unavailable)?;
+    let repository = input
+        .repository
+        .trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_ascii_lowercase();
+    let tags = input
+        .labels
+        .iter()
+        .map(|v| json!({"type":"label","value":v.trim()}))
+        .chain(
+            input
+                .categories
+                .iter()
+                .map(|v| json!({"type":"category","value":v.trim()})),
+        )
+        .collect::<Vec<_>>();
+    let metadata = json!({"title":input.title.trim(),"repository":repository,"visibility":input.visibility,"date":timestamp.get(..10).ok_or(Error::Unavailable)?,"createdAt":timestamp,"updatedAt":timestamp,"uploadedAt":timestamp,"tags":tags});
+    let slug = format!("{}-{}", input.slug, uuid::Uuid::new_v4());
+    let entry = app
+        .storage
+        .commit_upload(
+            &slug,
+            metadata,
+            prepared,
+            &principal,
+            &app.authority,
+            headers,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(record(&entry))).into_response())
 }
 async fn reviews(
     app: &App,

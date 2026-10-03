@@ -57,6 +57,7 @@ try {
   secrets.push(identity.credential,identity.secret,...Object.values(identity).flatMap(v=>v&&typeof v==='object'?[v.cookie,v.token].filter(Boolean):[]));
   const credentials=Object.fromEntries(['ci','evidence','gateway','csrf'].map(name=>[name,randomBytes(32).toString('base64url')]));
   secrets.push(...Object.values(credentials));for(const [name,value] of Object.entries(credentials))await writeFile(join(temporary,name),value,{mode:0o600,flag:'wx'});
+  await command('cargo',['build','--locked','--manifest-path',join(source,'auth-rust/Cargo.toml'),'--example','gateway_qa']);
   const authProcess=await start(join(source,'auth-rust/target/debug/examples/gateway_qa'),[],{}, {databaseURL:authorityURL,identity,ciFile:join(temporary,'ci'),evidenceFile:join(temporary,'evidence'),csrfFile:join(temporary,'csrf')},true);authority=authProcess.ready;
   secrets.push(authority.machineKey,authority.evidenceMachineKey);
   authorityDB=new pg.Pool({connectionString:authorityURL});

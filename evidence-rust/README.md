@@ -12,16 +12,24 @@ configured review Origin. Caller-supplied identity, scope, administrator and aut
 headers do not participate in authorization. Owner or current administrator is
 required for a private entry; unmapped legacy entries are administrator-only.
 
-## Authority blocker
+## Verified author source contract
 
-Current authority source returns user ID, current administrator status, lane and
-scopes, but no verified GitHub binding. Its public `/api/identity/github` route is
-PIN-session-bound, not a private service identity protocol. New upload requests are
-fully streamed and validated, then refused with `author_identity_required`, and
-their owned staging directory is removed. They do not fabricate attribution.
-The exact proposed authority-owned extension is in `docs/private-author-contract.md`.
-Until that contract exists and real source-owned integration passes, this is not
-Task 19 completion and cannot be activated as an upload replacement.
+The reviewed authority source at `6c5158a6e4118cf0a9cc6bb21fc5e738f0e628b0`
+returns required nullable `authorBinding` only on successful Evidence authorize.
+Evidence parses exactly numeric `githubUserId`, string `githubHandle` and positive
+`bindingVersion`, rejecting missing, malformed or extra binding fields. An unlinked
+account can read legacy content but cannot create a new revision. The public PIN
+identity route is used only by the authority's explicit OAuth/confirmation flow;
+Evidence never queries it for an author or accepts uploaded author strings.
+
+New upload commits preserve the server-derived immutable author snapshot and a
+separate submitting account/lane/machine/key audit. The same credential is freshly
+authorized immediately before the DB current-pointer mutation; account, session,
+grant, key and catalog denial or a changed author ID/handle/version refuses the
+commit. This is two fresh observations, not a distributed authority/content
+transaction. Existing author snapshots are never rewritten by unlink or relink.
+The frozen operating authority image does not supply this new contract; source
+acceptance does not authorize runtime activation.
 
 ## Filesystem and PostgreSQL protocol
 
@@ -92,3 +100,12 @@ removes its own filler. It never fills the host volume. The operator detaches th
 owned fixture after the crate-wide run. QA fixture grant preparation uses actual
 source-resolved legacy principals; it never seeds a GitHub binding or claims
 current PIN/author-ready acceptance.
+
+`node evidence-rust/tests/qa/author-source.mjs` verifies the exact authority commit
+and auth tree before running the test-only `tests/author-source` package. Its path
+dependency is the authority owner checkout, not copied authority server code or
+content migrations. That package runs actual RSA/JWKS Access identity, source
+GitHub state/PKCE exchange and explicit binding confirmation, service handoff,
+current private authorization, and machine-owner resolution. Synthetic GitHub
+responses represent the external provider only; they never fabricate the private
+authorize result. All fixture credentials stay in pipes or owner-only files.

@@ -28,6 +28,7 @@ pub struct Manifest {
 pub struct Files {
     root: PathBuf,
     ledger: Arc<Mutex<File>>,
+    events: tokio::sync::broadcast::Sender<serde_json::Value>,
 }
 pub struct Stage {
     pub id: Uuid,
@@ -144,10 +145,14 @@ impl Files {
         Ok(Self {
             root: fs::canonicalize(root)?,
             ledger: Arc::new(Mutex::new(ledger)),
+            events: tokio::sync::broadcast::channel(256).0,
         })
     }
     pub fn root(&self) -> &Path {
         &self.root
+    }
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<serde_json::Value> {
+        self.events.subscribe()
     }
     pub fn record(&self, id: Uuid, state: &str, digest: Option<&str>) -> Result<()> {
         let mut ledger = self.ledger.lock().map_err(|_| Error::Unavailable)?;
@@ -171,6 +176,9 @@ impl Files {
             "{}",
             serde_json::json!({"event":"evidence_stage","stage":id,"state":state,"digest":digest})
         );
+        let _subscribers = self
+            .events
+            .send(serde_json::json!({"stage":id,"state":state,"digest":digest}));
         Ok(())
     }
     pub fn stage(&self) -> Result<Stage> {
