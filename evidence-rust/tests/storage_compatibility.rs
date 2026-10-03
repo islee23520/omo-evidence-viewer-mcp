@@ -208,6 +208,47 @@ async fn storage_compatibility() -> Result {
     let private = format!("{origin}/evidence/{}/assets/proof.bin", entry.slug);
     let public = format!("{origin}/public/{}/assets/proof.bin", entry.slug);
     let mut http = Vec::<Value>::new();
+    let mut foreign_stage = storage.files.stage()?;
+    foreign_stage.add("proof.txt".into(), b"private synthetic proof")?;
+    let foreign = storage
+        .import(
+            "foreign-synthetic",
+            Some("different-synthetic-owner"),
+            json!({"title":"Hidden synthetic title","visibility":"private"}),
+            foreign_stage,
+            &"c".repeat(64),
+        )
+        .await?;
+    let foreign_response = client
+        .get(format!("{origin}/evidence/{}/proof.txt", foreign.slug))
+        .header("cookie", &cookie)
+        .send_captured()
+        .await?;
+    assert_eq!(foreign_response.status(), 404);
+    assert!(
+        !foreign_response
+            .text()
+            .await?
+            .contains("Hidden synthetic title")
+    );
+    // A read-only staging filesystem fails without changing an existing pointer.
+    fs::set_permissions(root.join("staging"), fs::Permissions::from_mode(0o500))?;
+    assert!(storage.files.stage().is_err());
+    fs::set_permissions(root.join("staging"), fs::Permissions::from_mode(0o700))?;
+    assert_eq!(storage.get(&entry.slug).await?.revision, before);
+    // Descriptor-relative reads refuse symlinks even inside a known immutable manifest.
+    let revision_dir = root.join("revisions").join(&entry.digest);
+    let asset_dir = revision_dir.join("assets");
+    fs::set_permissions(&revision_dir, fs::Permissions::from_mode(0o700))?;
+    fs::set_permissions(&asset_dir, fs::Permissions::from_mode(0o700))?;
+    fs::rename(asset_dir.join("proof.bin"), asset_dir.join("saved.bin"))?;
+    std::os::unix::fs::symlink(asset_dir.join("saved.bin"), asset_dir.join("proof.bin"))?;
+    assert_eq!(client.get(&public).send_captured().await?.status(), 404);
+    fs::remove_file(asset_dir.join("proof.bin"))?;
+    fs::rename(asset_dir.join("saved.bin"), asset_dir.join("proof.bin"))?;
+    fs::set_permissions(&asset_dir, fs::Permissions::from_mode(0o500))?;
+    fs::set_permissions(&revision_dir, fs::Permissions::from_mode(0o500))?;
+    storage.files.verify(&entry.digest, &entry.manifest)?;
     let response = client
         .get(&private)
         .header("cookie", &cookie)
