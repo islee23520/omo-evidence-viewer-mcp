@@ -65,6 +65,57 @@ Start with `docker compose up -d --build`. Keep the origin on a private network,
 
 Set `UPLOAD_TOKEN` to a random secret to enable uploads. Without it, the upload endpoint returns 503. `RETENTION_DAYS` defaults to 30 and `CLEANUP_INTERVAL_HOURS` to 24; both must be positive. Cleanup runs on startup and periodically, removing only folders with expired server-generated `uploadedAt` metadata. Manually copied folders aren't subject to upload retention. `bun storage.mjs` runs cleanup once when the storage module is available.
 
+### Central upload and publication authority (opt-in)
+
+The default `EVIDENCE_AUTH_MODE=legacy` (also the unset default) retains existing
+token uploads, visibility PATCH and `REVIEW_ORIGIN` behavior. Central mode is
+explicit: set `EVIDENCE_AUTH_MODE=central` and `EVIDENCE_GATEWAY_SECRET_FILE` to a
+protected regular file shared only with the trusted gateway. Its trimmed secret
+must be at least 32 bytes, have no whitespace/control characters, and differ
+from `UPLOAD_TOKEN`. Unix files must be owner-only. Missing, short, reused or
+unprotected credentials prevent startup. Keep both credentials outside Git and
+logs; central mode still requires the existing `Authorization: Bearer UPLOAD_TOKEN`.
+
+The gateway must authorize **each request** through the current Rust authority,
+strip all caller identity/trust headers, and construct these downstream headers
+only from the returned verified decision:
+
+| Header | Wire value |
+| --- | --- |
+| `x-linalab-evidence-principal` | `browser` or `machine` (the returned `principalType`) |
+| `x-linalab-evidence-scopes` | JSON string array of returned `effectiveScopes` |
+| `x-linalab-evidence-gateway-secret` | Independent secret loaded from the protected file |
+
+Malformed, missing, forged or wrong-lane context fails closed. POST multipart
+uploads require `evidence:upload`. A parsed metadata `visibility: "public"`
+additionally requires a **browser** with `evidence:publish`, checked before any
+staging directory, asset or metadata write. PATCH visibility in either direction
+requires browser publish authority before reading or writing the record. Machines
+can upload privately but never publish. Email, administrator status, the upload
+token, and the upload URL confer no publish scope. No positive privilege cache
+is used by the gateway. The storage boundary checks context on every request.
+
+Operational gateway forwarding, secret provisioning/mounts and enabling central
+mode remain pending in the parent deployment. This change adds the contract and
+helper, not an installed or activated gateway. The origin must remain reachable
+only through the trusted deployment boundary.
+
+Real cross-package regression tests require the CI checkout's compiled Rust QA
+authority and its existing isolated PostgreSQL QA connection on loopback 15439.
+Build `auth-rust/examples/gateway_qa.rs` in that checkout, then run:
+
+```sh
+AUTH_RUST_QA_FILE=/path/to/protected-qa.env \
+EVIDENCE_AUTHORITY_FIXTURE=/path/to/linalab-ci/tests/qa/rust-authority-fixture.mjs \
+bun test
+```
+
+The QA file contains `PG_QA_DATABASE_URL` for the disposable QA instance. Tests
+create uniquely named disposable databases, generated independent credential
+files, real Rust/Node listeners and temporary Evidence filesystems. They exercise
+actual multipart writes and prove denied requests preserve existing files and
+metadata. Authority responses are not mocked.
+
 ## GGUI document viewers
 
 ### Prepare GGUI

@@ -1,4 +1,4 @@
-import { mkdir, readdir, rename, rm, writeFile, readFile, realpath } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, writeFile, readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve, relative, isAbsolute } from "node:path";
 import { timingSafeEqual, randomUUID } from "node:crypto";
@@ -6,6 +6,36 @@ import { githubRepository } from "./repository.mjs";
 import { generateDocumentViewer } from "./ggui.mjs";
 
 export const evidenceRoot = resolve(process.env.EVIDENCE_ROOT || resolve(homedir(), ".omo/evidence/gallery-public"));
+// Explicit opt-in; UPLOAD_TOKEN proves transport access, never central publish authority.
+const centralMode = process.env.EVIDENCE_AUTH_MODE === "central";
+if (process.env.EVIDENCE_AUTH_MODE && !["legacy", "central"].includes(process.env.EVIDENCE_AUTH_MODE)) {
+  throw new Error("EVIDENCE_AUTH_MODE must be legacy or central");
+}
+let gatewaySecret;
+if (centralMode) {
+  const path = process.env.EVIDENCE_GATEWAY_SECRET_FILE;
+  if (!path) throw new Error("Independent Evidence gateway credential file required");
+  const info = await stat(path);
+  gatewaySecret = (await readFile(path, "utf8")).trim();
+  if (!info.isFile() || (process.platform !== "win32" && (info.mode & 0o077) !== 0)
+    || gatewaySecret.length < 32 || gatewaySecret.length > 4096 || /[\s\x00-\x1f\x7f]/.test(gatewaySecret)
+    || gatewaySecret === process.env.UPLOAD_TOKEN) throw new Error("Independent Evidence gateway credential required");
+}
+
+function trustedContext(request) {
+  const supplied = Buffer.from(request.headers.get("x-linalab-evidence-gateway-secret") || "");
+  const expected = Buffer.from(gatewaySecret);
+  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return null;
+  const principalType = request.headers.get("x-linalab-evidence-principal");
+  let effectiveScopes;
+  try { effectiveScopes = JSON.parse(request.headers.get("x-linalab-evidence-scopes")); } catch { return null; }
+  if (!["browser", "machine"].includes(principalType) || !Array.isArray(effectiveScopes)
+    || new Set(effectiveScopes).size !== effectiveScopes.length
+    || effectiveScopes.some(scope => typeof scope !== "string" || !/^evidence:[a-z][a-z0-9:-]*$/.test(scope))
+    || (principalType === "machine" && effectiveScopes.some(scope => scope.split(":").some(part => ["admin", "publish", "browser"].includes(part))))) return null;
+  return { principalType, effectiveScopes };
+}
+
 export async function reviewResponse(request, root, publicOrigin = process.env.REVIEW_ORIGIN) {
   const url = new URL(request.url);
   const slug = url.searchParams.get('slug');
@@ -70,7 +100,11 @@ export async function uploadEvidence(request, existingSlug) {
   if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
+  const context = centralMode ? trustedContext(request) : null;
+  if (centralMode && !context) return Response.json({ error: "Trusted Evidence context required" }, { status: 403 });
+  const canPublish = context?.principalType === "browser" && context.effectiveScopes.includes("evidence:publish");
   if (existingSlug !== undefined) {
+    if (centralMode && !canPublish) return Response.json({ error: "Browser publish scope required" }, { status: 403 });
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(existingSlug)) return Response.json({ error: "Invalid slug" }, { status: 400 });
     let visibility;
     try { ({ visibility } = await request.json()); } catch { return Response.json({ error: "Invalid JSON" }, { status: 400 }); }
@@ -83,6 +117,9 @@ export async function uploadEvidence(request, existingSlug) {
     await writeFile(path, JSON.stringify(record, null, 2) + "\n");
     return Response.json({ slug: existingSlug, url: `${visibility === "public" ? "/public/" : "/evidence/"}${existingSlug}/`, ...record }, { headers: { "Cache-Control": "no-store" } });
   }
+  if (centralMode && !context.effectiveScopes.includes("evidence:upload")) {
+    return Response.json({ error: "Upload scope required" }, { status: 403 });
+  }
   let form, metadata;
   try {
     form = await request.formData();
@@ -92,6 +129,9 @@ export async function uploadEvidence(request, existingSlug) {
   }
   const { slug, title, repository, labels = [], categories = [], visibility = "private" } = metadata ?? {};
   if (!["private", "public"].includes(visibility)) return Response.json({ error: "Visibility must be private or public" }, { status: 400 });
+  if (centralMode && visibility === "public" && !canPublish) {
+    return Response.json({ error: "Browser publish scope required" }, { status: 403 });
+  }
   let canonicalRepository;
   try { canonicalRepository = githubRepository(repository); } catch (error) { return Response.json({ error: error.message }, { status: 400 }); }
   const files = form.getAll("files");
