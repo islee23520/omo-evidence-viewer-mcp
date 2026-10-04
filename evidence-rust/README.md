@@ -79,6 +79,15 @@ fixed `AUTH_PRIVATE_ORIGIN`, `REVIEW_ORIGIN`, and `EVIDENCE_BIND`. No credential
 are printed. Acceptance uses synthetic data only; no personal evidence root is
 read or mounted.
 
+The optional operator reference `AUTH_PRIVATE_CA_FILE` is loaded once by the
+authority constructor. It must name an absolute current-owner regular file
+(0600) in a current-owner directory (0700), with no symlinked path components.
+Exactly one PEM certificate, bounded to 64 KiB, replaces trust roots only on
+this authority client. Missing, malformed or unprotected configured references
+fail startup with redacted errors; absence preserves existing trust behavior.
+Normal chain and SAN verification remain enabled. Non-loopback authority origins
+still require HTTPS, with ambient proxies and redirects disabled.
+
 ## Isolated acceptance runner
 
 `node evidence-rust/tests/qa/storage.mjs` requires `EVIDENCE_QA_AUTH_SOURCE`

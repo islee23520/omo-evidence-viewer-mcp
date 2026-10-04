@@ -3,7 +3,7 @@ use crate::{Error, Result, now};
 use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, io::Read, path::Path, time::Duration};
 use url::Url;
 
 #[derive(Clone)]
@@ -116,12 +116,14 @@ impl Authority {
         {
             return Err(Error::Invalid);
         }
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(5))
-            .build()
-            .map_err(|_| Error::Unavailable)?;
+            .timeout(Duration::from_secs(5));
+        if let Some(path) = std::env::var_os("AUTH_PRIVATE_CA_FILE") {
+            builder = builder.tls_certs_only([private_ca(Path::new(&path))?]);
+        }
+        let client = builder.build().map_err(|_| Error::Unavailable)?;
         Ok(Self {
             origin,
             secret,
@@ -196,6 +198,75 @@ impl Authority {
         }
         Ok(principal)
     }
+}
+fn private_ca(path: &Path) -> Result<reqwest::Certificate> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+
+    if !path.is_absolute() {
+        return Err(Error::Invalid);
+    }
+    // Walk from a pinned root descriptor: ancestor replacement cannot redirect
+    // the file open, and NOFOLLOW rejects links at every component.
+    let mut directory = rustix::fs::open(
+        "/",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| Error::Invalid)?;
+    let mut components = path.components().skip(1).peekable();
+    let uid = rustix::process::geteuid().as_raw();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(Error::Invalid);
+        };
+        if components.peek().is_some() {
+            directory = rustix::fs::openat(
+                &directory,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| Error::Invalid)?;
+            continue;
+        }
+        let parent = rustix::fs::fstat(&directory).map_err(|_| Error::Invalid)?;
+        if parent.st_uid != uid || parent.st_mode & 0o077 != 0 {
+            return Err(Error::Invalid);
+        }
+        let fd = rustix::fs::openat(
+            &directory,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| Error::Invalid)?;
+        let file = std::fs::File::from(fd);
+        let info = file.metadata().map_err(|_| Error::Invalid)?;
+        if !info.is_file()
+            || info.uid() != uid
+            || info.mode() & 0o077 != 0
+            || info.len() == 0
+            || info.len() > 65536
+        {
+            return Err(Error::Invalid);
+        }
+        let mut bytes = Vec::new();
+        file.take(65537)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error::Invalid)?;
+        if bytes.is_empty() || bytes.len() > 65536 {
+            return Err(Error::Invalid);
+        }
+        let mut certificates =
+            reqwest::Certificate::from_pem_bundle(&bytes).map_err(|_| Error::Invalid)?;
+        if certificates.len() != 1 {
+            return Err(Error::Invalid);
+        }
+        return certificates.pop().ok_or(Error::Invalid);
+    }
+    Err(Error::Invalid)
 }
 fn credential(headers: &HeaderMap) -> Result<(&'static str, String)> {
     if headers.contains_key("authorization") {
