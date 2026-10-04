@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
-import {readFile,writeFile,stat} from 'node:fs/promises';
+import {readFile,writeFile,stat,realpath} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {join} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
@@ -15,7 +15,12 @@ const pool=new pg.Pool({connectionString:url.href});const catalog=async()=>(awai
 const before=await catalog();const commands=[];
 async function command(program,args,cwd=product){const child=spawn(program,args,{cwd,env:{...process.env,AUTH_RUST_QA_FILE:reference,AUTH_RUST_QA_PORT:'15440'},stdio:['ignore','pipe','pipe']});const exit=once(child,'close');let output='';for(const stream of [child.stdout,child.stderr])stream.on('data',chunk=>output+=chunk);const result=await exit;output=output.replaceAll(raw,'[REDACTED PG URL]').replaceAll(url.href,'[REDACTED PG URL]');commands.push({program,args,exit:result,output,outputSha256:createHash('sha256').update(output).digest('hex')});await writeFile(join(archive,'commands.json'),JSON.stringify(commands,null,2),{mode:0o600});assert.deepEqual(result,[0,null]);return output.trim();}
 try {
-  assert.equal(await command('git',['rev-parse','HEAD'],source),'6c5158a6e4118cf0a9cc6bb21fc5e738f0e628b0');
+  // c7eb7b8 is an explicit CI-QA-only successor; its auth-rust tree is
+  // identical to the reviewed 6c5158a authority. Verify Cargo's physical path,
+  // not just an unrelated checkout supplied by the operator.
+  assert.equal(await realpath(source),await realpath(join(product,'../../linalab-ci-wt/reliability-20261002')));
+  const head=await command('git',['rev-parse','HEAD'],source);
+  assert.ok(['6c5158a6e4118cf0a9cc6bb21fc5e738f0e628b0','c7eb7b81bb15f77e14433686b805304567b40ca0'].includes(head));
   assert.equal(await command('git',['rev-parse','HEAD:auth-rust'],source),'77459922ef4d0dc2914f29e2af0b87f859a6d8ae');
   await command('cargo',['build','--locked','--manifest-path','evidence-rust/Cargo.toml']);
   await command('cargo',['test','--locked','--manifest-path','evidence-rust/tests/author-source/Cargo.toml','--test','author_ready','--','--nocapture']);

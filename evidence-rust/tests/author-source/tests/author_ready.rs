@@ -8,6 +8,8 @@ mod oracle;
 mod setup;
 #[path = "support/support.rs"]
 mod support;
+#[path = "support/transport.rs"]
+mod transport;
 #[path = "support/wire.rs"]
 mod wire;
 
@@ -140,6 +142,7 @@ async fn run(f: &Fixture) -> Result {
         files: Files::open(&root)?,
     };
     let secret = "private-author-independent-evidence-transport-credential";
+    transport::verify(f, &root, &url, secret, &browser).await?;
     let app = router(App {
         storage: storage.clone(),
         authority: Authority::new(f.private.origin.parse()?, secret.into())?,
